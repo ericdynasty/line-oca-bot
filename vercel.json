@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "functions": {
+    "api/*.js": { "runtime": "nodejs18.x", "maxDuration": 20 }
+  },
+  "routes": [
+    { "src": "/api/line-webhook", "dest": "api/line-webhook.js" },
+    { "src": "/api/ping", "dest": "api/ping.js" }
+  ]
+}
