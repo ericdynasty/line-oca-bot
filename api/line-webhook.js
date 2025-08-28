@@ -5,7 +5,6 @@ const { Client } = require('@line/bot-sdk');
 const Tesseract = require('tesseract.js');
 const path = require('path');
 
-// LINE bot client
 const client = new Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
 });
@@ -112,19 +111,25 @@ async function downloadImageBuffer(messageId) {
   });
 }
 
-// ---------- OCR（使用 node_modules 絕對路徑載入 worker / wasm） ----------
+// ---------- OCR（使用 node_modules 絕對路徑 + file:// + 禁用 Blob URL） ----------
 async function ocrScoresFromBuffer(buf, timeoutMs = 20000) {
-  // 讓 Node 的 Worker 使用「本機檔案路徑」，避免 ERR_WORKER_PATH
-  const workerPath = require.resolve('tesseract.js/dist/worker.min.js');
-  const corePath = require.resolve('tesseract.js-core/tesseract-core-simd.wasm');
+  const workerFsPath = require.resolve('tesseract.js/dist/worker.min.js');
+  const coreFsPath   = require.resolve('tesseract.js-core/tesseract-core-simd.wasm');
+
+  const workerPath = 'file://' + workerFsPath;
+  const corePath   = 'file://' + coreFsPath;
+
+  console.log('[OCR] workerPath =', workerPath);
+  console.log('[OCR] corePath   =', corePath);
 
   const options = {
     logger: () => {},
-    workerPath,               // 絕對路徑（node_modules）
-    corePath,                 // 絕對路徑（node_modules）
-    langPath: 'https://tessdata.projectnaptha.com/5', // 語料走 CDN 以加速
+    workerPath,
+    corePath,
+    workerBlobURL: false,
+    langPath: 'https://tessdata.projectnaptha.com/5',
     tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:-=',
-    psm: 6,                   // 單一區塊文字
+    psm: 6,
     cacheMethod: 'readOnly'
   };
 
