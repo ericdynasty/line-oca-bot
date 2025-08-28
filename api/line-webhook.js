@@ -1,12 +1,14 @@
-// CommonJS 版本 + 簽章驗證（適用 Vercel Serverless Functions）
+// api/line-webhook.js
+// CommonJS + 簽章驗證（Production 強制驗簽；非 Production 失敗則放行但寫入警告）
 const crypto = require('crypto');
 const { Client } = require('@line/bot-sdk');
 
+// 用來回覆訊息（別忘了在 Vercel 專案環境變數設定 LINE_CHANNEL_ACCESS_TOKEN）
 const client = new Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
 });
 
-// 讀取 raw body（簽章要用「未修改的原始字串」）
+// ---------- 簽章驗證工具 ----------
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -17,47 +19,61 @@ function readRawBody(req) {
   });
 }
 
-// 驗證 LINE 簽章
 function verifySignature(secret, rawBody, signature) {
   if (!secret || !signature) return false;
-  const hmac = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
+  const mac = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
   try {
-    return crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(signature));
+    return crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(signature));
   } catch {
     return false;
   }
 }
 
+// ---------- Webhook 入口 ----------
 module.exports = async (req, res) => {
-  // 讓你用瀏覽器 GET /api/line-webhook 時看到 OK，確認路由存在
+  // 讓你用瀏覽器 GET /api/line-webhook 檢查路由是否存在
   if (req.method !== 'POST') return res.status(200).send('OK');
 
   try {
-    const secret = process.env.LINE_CHANNEL_SECRET || '';
-    const signature = req.headers['x-line-signature'] || '';
+    const isProd = (process.env.VERCEL_ENV === 'production') || (process.env.NODE_ENV === 'production');
 
+    // 一定要用「原始字串」做驗簽
     const rawBody = await readRawBody(req);
+    const signature = req.headers['x-line-signature'] || '';
+    const secret = process.env.LINE_CHANNEL_SECRET || '';
 
-    if (!verifySignature(secret, rawBody, signature)) {
-      console.warn('LINE signature verification failed');
+    const ok = verifySignature(secret, rawBody, signature);
+
+    if (isProd && !ok) {
+      console.warn('[webhook] bad signature (production)');
       return res.status(401).send('Bad signature');
     }
+    if (!isProd && !ok) {
+      console.warn('[webhook] signature failed (non-prod, allowed for testing)');
+    }
 
-    // 驗證通過後再解析 JSON
-    const body = rawBody ? JSON.parse(rawBody) : {};
+    // 驗簽之後再 parse
+    let body = {};
+    try {
+      body = rawBody ? JSON.parse(rawBody) : {};
+    } catch (e) {
+      console.warn('[webhook] JSON parse error:', e);
+      body = {};
+    }
+
     const events = Array.isArray(body.events) ? body.events : [];
-
     await Promise.all(events.map(handleEvent));
     return res.status(200).send('OK');
   } catch (err) {
-    console.error('handler error', err);
+    console.error('[webhook] handler error', err);
     return res.status(200).send('OK');
   }
 };
 
-// ----------------- 以下為分析與回覆邏輯（與你原本一致） -----------------
+// ---------- 事件處理 ----------
 async function handleEvent(event) {
   if (event.type !== 'message') return;
+
   const replyToken = event.replyToken;
 
   if (event.message.type === 'text') {
@@ -81,6 +97,7 @@ async function handleEvent(event) {
   }
 }
 
+// ---------- OCA 分析（依你的教材口徑，生活化話術） ----------
 function parseScoresFromText(text) {
   const map = {};
   const regex = /([A-J])\s*:?\s*(-?\d{1,3})/gi;
@@ -144,7 +161,7 @@ function buildPersona(s) {
   return { labels, pains: pains.length ? pains : ['整體平衡，持續小步快跑累積成就感即可。'], manicHints, gaps, talk };
 }
 
-// 用 QuickChart「網址」產圖，免安裝套件
+// 用 QuickChart 網址產圖（免安裝額外套件）
 function buildChartUrl(s) {
   const labels = ['A','B','C','D','E','F','G','H','I','J'];
   const data = labels.map(k => s[k]);
