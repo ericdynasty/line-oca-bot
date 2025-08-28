@@ -1,14 +1,14 @@
+// CommonJS 版本（Vercel 最穩）
 const { Client } = require('@line/bot-sdk');
-const QuickChart = require('quickchart-js');
 
-// 先不做簽章驗證，確保能跑起來
+// 不先做簽章驗證，確保能跑起來
 const client = new Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
 });
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
-    // 讓你用瀏覽器 GET /api/line-webhook 時看到 OK，表示路由存在
+    // 用瀏覽器 GET /api/line-webhook 會看到 OK，代表路由存在
     return res.status(200).send('OK');
   }
   try {
@@ -110,7 +110,8 @@ function buildPersona(s) {
   return { labels, pains: pains.length ? pains : ['整體平衡，持續小步快跑累積成就感即可。'], manicHints, gaps, talk };
 }
 
-async function buildChartUrl(s) {
+// 這版用 QuickChart「網址」產圖，不需安裝任何套件
+function buildChartUrl(s) {
   const labels = ['A','B','C','D','E','F','G','H','I','J'];
   const data = labels.map(k => s[k]);
 
@@ -118,11 +119,7 @@ async function buildChartUrl(s) {
   if (s.B >= 80 || s.B <= -70) highlight.push({ x: 1, y: s.B });
   if (s.E >= 80 || s.E <= -70) highlight.push({ x: 4, y: s.E });
 
-  const qc = new QuickChart();
-  qc.width = 900;
-  qc.height = 500;
-  qc.backgroundColor = 'white';
-  qc.config = {
+  const config = {
     type: 'line',
     data: {
       labels,
@@ -139,7 +136,15 @@ async function buildChartUrl(s) {
       }
     }
   };
-  return qc.getUrl();
+
+  const params = new URLSearchParams({
+    width: '900',
+    height: '500',
+    backgroundColor: 'white',
+    c: JSON.stringify(config)
+  });
+
+  return `https://quickchart.io/chart?${params.toString()}`;
 }
 
 function analysisText(s, persona) {
@@ -162,7 +167,7 @@ function analysisText(s, persona) {
 
 async function replyWithAnalysis(replyToken, scores) {
   const persona = buildPersona(scores);
-  const chartUrl = await buildChartUrl(scores);
+  const chartUrl = buildChartUrl(scores);
 
   await client.replyMessage(replyToken, [
     { type: 'image', originalContentUrl: chartUrl, previewImageUrl: chartUrl },
