@@ -4,8 +4,7 @@ const crypto = require('crypto');
 const { Client } = require('@line/bot-sdk');
 const Tesseract = require('tesseract.js');
 
-// 你需要在 Vercel 專案環境變數設定：
-// LINE_CHANNEL_ACCESS_TOKEN、LINE_CHANNEL_SECRET
+// 需要的環境變數：LINE_CHANNEL_ACCESS_TOKEN、LINE_CHANNEL_SECRET
 const client = new Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
 });
@@ -120,10 +119,8 @@ async function ocrScoresFromBuffer(buf, timeoutMs = 15000) {
   const p = Tesseract.recognize(buf, 'eng', { logger: () => {} });
   const res = await withTimeout(p, timeoutMs);
   const text = (res && res.data && res.data.text) ? res.data.text : '';
-  // console.log('[OCR] raw text:', text);
   return extractScoresFromText(text);
 }
-
 function withTimeout(promise, ms) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('OCR timeout')), ms);
@@ -131,8 +128,6 @@ function withTimeout(promise, ms) {
            .catch((e) => { clearTimeout(t); reject(e); });
   });
 }
-
-// 把全形字、各種破折號/負號、頓號等清理成易於比對的字串
 function normalize(str) {
   if (!str) return '';
   const full2half = s => s.replace(/[Ａ-Ｚ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
@@ -140,8 +135,6 @@ function normalize(str) {
   const unifyColon = s => s.replace(/[：;]/g, ':');
   return unifyColon(unifyMinus(full2half(str))).replace(/\s+/g, ' ');
 }
-
-// 從任意文字中萃取 A~J 對應的數值（-100 ~ 100）
 function extractScoresFromText(text) {
   const out = {};
   const s = normalize(text);
@@ -154,7 +147,6 @@ function extractScoresFromText(text) {
   }
   return out; // 可能只有部分鍵
 }
-
 function mergeIfComplete(partial) {
   if (!partial) return null;
   const keys = ['A','B','C','D','E','F','G','H','I','J'];
@@ -162,12 +154,13 @@ function mergeIfComplete(partial) {
   return ok ? keys.reduce((acc,k) => (acc[k] = partial[k], acc), {}) : null;
 }
 
-// ---------- OCA 分析（與你教材口徑一致） ----------
+// ---------- 文字解析（複用上面的擷取器） ----------
 function parseScoresFromText(text) {
   const out = extractScoresFromText(text);
   return mergeIfComplete(out);
 }
 
+// ---------- 分析邏輯 ----------
 function pickLabels(s) {
   const labels = [];
   if (s.C <= -20 && s.G <= -20 && s.H <= -20) labels.push('內耗型');
@@ -210,7 +203,7 @@ function buildPersona(s) {
   return { labels, pains: pains.length ? pains : ['整體平衡，持續小步快跑累積成就感即可。'], manicHints, gaps, talk };
 }
 
-// ---------- 圖表（QuickChart 網址，免安裝） ----------
+// ---------- 圖表（QuickChart 網址） ----------
 function buildChartUrl(s) {
   const labels = ['A','B','C','D','E','F','G','H','I','J'];
   const data = labels.map(k => s[k]);
