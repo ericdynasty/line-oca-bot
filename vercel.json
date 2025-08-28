@@ -1,7 +1,6 @@
 {
   "version": 2,
-  "routes": [
-    { "src": "/api/line-webhook", "dest": "api/line-webhook.js" },
-    { "src": "/api/ping", "dest": "api/ping.js" }
-  ]
+  "functions": {
+    "api/*.js": { "maxDuration": 30, "memory": 1536 }
+  }
 }
