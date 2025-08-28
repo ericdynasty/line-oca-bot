@@ -1,9 +1,11 @@
 // api/line-webhook.js
-// 簽章驗證（Production 強制）+ 圖片 OCR 擷取 A~J（CDN 載 wasm/worker；強化容錯）
+// 簽章驗證（Production 強制）+ 圖片 OCR 擷取 A~J（使用 node_modules 實體路徑載 worker/wasm）
 const crypto = require('crypto');
 const { Client } = require('@line/bot-sdk');
 const Tesseract = require('tesseract.js');
+const path = require('path');
 
+// LINE bot client
 const client = new Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
 });
@@ -110,20 +112,19 @@ async function downloadImageBuffer(messageId) {
   });
 }
 
-// ---------- OCR（改用 CDN 載 wasm/worker，並加白名單/PSM） ----------
+// ---------- OCR（使用 node_modules 絕對路徑載入 worker / wasm） ----------
 async function ocrScoresFromBuffer(buf, timeoutMs = 20000) {
+  // 讓 Node 的 Worker 使用「本機檔案路徑」，避免 ERR_WORKER_PATH
+  const workerPath = require.resolve('tesseract.js/dist/worker.min.js');
+  const corePath = require.resolve('tesseract.js-core/tesseract-core-simd.wasm');
+
   const options = {
     logger: () => {},
-    // 這兩行最關鍵：避免在 /var/task 尋找本地 wasm，改走 CDN
-    corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0/tesseract-core-simd.wasm',
-    workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.0.0/dist/worker.min.js',
-
-    // 語料也走 CDN（載入更快）
-    langPath: 'https://tessdata.projectnaptha.com/5',
-
-    // 只允許需要的字元，降低誤判
+    workerPath,               // 絕對路徑（node_modules）
+    corePath,                 // 絕對路徑（node_modules）
+    langPath: 'https://tessdata.projectnaptha.com/5', // 語料走 CDN 以加速
     tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:-=',
-    psm: 6,                // 單一區塊文字
+    psm: 6,                   // 單一區塊文字
     cacheMethod: 'readOnly'
   };
 
@@ -182,7 +183,7 @@ function parseScoresFromText(text) {
   return mergeIfComplete(out);
 }
 
-// ---------- 分析（與先前一致） ----------
+// ---------- 分析（同前） ----------
 function pickLabels(s) {
   const labels = [];
   if (s.C <= -20 && s.G <= -20 && s.H <= -20) labels.push('內耗型');
