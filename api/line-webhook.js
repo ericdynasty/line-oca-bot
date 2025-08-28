@@ -1,5 +1,5 @@
 // api/line-webhook.js
-// CommonJS + 簽章驗證（Production 強制）+ 圖片 OCR 擷取 A~J（強化容錯）
+// 簽章驗證（Production 強制）+ 圖片 OCR 擷取 A~J（CDN 載 wasm/worker；強化容錯）
 const crypto = require('crypto');
 const { Client } = require('@line/bot-sdk');
 const Tesseract = require('tesseract.js');
@@ -61,6 +61,7 @@ async function handleEvent(event) {
   const replyToken = event.replyToken;
   const userId = event?.source?.userId;
 
+  // 文字：解析 A~J
   if (event.message.type === 'text') {
     const scores = parseScoresFromText(event.message.text);
     if (!scores) {
@@ -72,15 +73,17 @@ async function handleEvent(event) {
     return;
   }
 
+  // 圖片：OCR 擷取 A~J
   if (event.message.type === 'image') {
-    // 先回覆以避免 LINE 的 1 分鐘限制
     await client.replyMessage(replyToken, { type: 'text', text: '已收到圖片，我正在分析 OCA 分數（約 10~20 秒）…' });
     try {
       const buf = await downloadImageBuffer(event.message.id);
       const { partial, rawText } = await ocrScoresFromBuffer(buf, 20000); // 20s
+
       if (process.env.DEBUG_OCR_TEXT === '1' && userId) {
         await safePush(userId, { type: 'text', text: `OCR 原文：\n${rawText?.slice(0, 1000) || '(empty)'}` });
       }
+
       const scores = mergeIfComplete(partial);
       if (!scores) {
         await safePush(userId, { type: 'text',
@@ -107,16 +110,23 @@ async function downloadImageBuffer(messageId) {
   });
 }
 
-// ---------- OCR 強化 ----------
+// ---------- OCR（改用 CDN 載 wasm/worker，並加白名單/PSM） ----------
 async function ocrScoresFromBuffer(buf, timeoutMs = 20000) {
   const options = {
     logger: () => {},
-    // 使用官方 CDN，首次載入語料比較快
+    // 這兩行最關鍵：避免在 /var/task 尋找本地 wasm，改走 CDN
+    corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0/tesseract-core-simd.wasm',
+    workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.0.0/dist/worker.min.js',
+
+    // 語料也走 CDN（載入更快）
     langPath: 'https://tessdata.projectnaptha.com/5',
-    // 只允許辨識這些字元，降低誤判
+
+    // 只允許需要的字元，降低誤判
     tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:-=',
-    psm: 6 // Assume a single uniform block of text
+    psm: 6,                // 單一區塊文字
+    cacheMethod: 'readOnly'
   };
+
   const p = Tesseract.recognize(buf, 'eng', options);
   const res = await withTimeout(p, timeoutMs);
   const text = (res && res.data && res.data.text) ? res.data.text : '';
@@ -137,22 +147,17 @@ function normalize(str) {
   if (!str) return '';
   const full2halfAZ = s => s.replace(/[Ａ-Ｚ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
   const unifyMinus  = s => s.replace(/[−–—﹣－ーｰ~〜]/g, '-');
-  const unifyColon  = s => s.replace(/[：;＝=]/g, ':'); // 支援全形冒號與等號
+  const unifyColon  = s => s.replace(/[：;＝=]/g, ':'); // 支援全形冒號/等號
   const unifySpace  = s => s.replace(/\s+/g, ' ');
   return unifySpace(unifyColon(unifyMinus(full2halfAZ(str))));
 }
 
-// 從任何文字中萃取「看起來像 A~J:數字」的片段（容錯版）
-// - 接受 : 或 = 作為分隔
-// - 容許 I 被誤辨為 1 或 L（先正規化後再對映）
+// 從任意文字萃取 A~J：支援 ":" 或 "="、容忍 I 被辨成 1/L
 function extractScoresFromText(text) {
   const out = {};
   let s = normalize(text);
+  s = s.replace(/\b[1l]\s*:/gi, 'I:');  // 1/L → I
 
-  // 常見誤辨：把 key「I」看成「1」或「L」
-  s = s.replace(/\b[1l]\s*:/gi, 'I:');
-
-  // A~J 或 1/L→I，分隔可為 : 或 =，數字允許 +/- 與 1~3 位
   const re = /([A-J]|I)\s*[:=]?\s*([+-]?\d{1,3})/gi;
   let m;
   while ((m = re.exec(s))) {
@@ -161,7 +166,7 @@ function extractScoresFromText(text) {
     const v = Math.max(-100, Math.min(100, parseInt(m[2], 10)));
     out[k] = v;
   }
-  return out; // 可能只有部分鍵
+  return out;
 }
 
 function mergeIfComplete(partial) {
@@ -171,13 +176,13 @@ function mergeIfComplete(partial) {
   return ok ? keys.reduce((acc,k) => (acc[k] = partial[k], acc), {}) : null;
 }
 
-// ---------- 文字輸入（複用上面擷取器） ----------
+// ---------- 文字輸入 ----------
 function parseScoresFromText(text) {
   const out = extractScoresFromText(text);
   return mergeIfComplete(out);
 }
 
-// ---------- 分析邏輯（同前） ----------
+// ---------- 分析（與先前一致） ----------
 function pickLabels(s) {
   const labels = [];
   if (s.C <= -20 && s.G <= -20 && s.H <= -20) labels.push('內耗型');
