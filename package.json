@@ -2,6 +2,7 @@
   "name": "line-oca-bot",
   "private": true,
   "dependencies": {
-    "@line/bot-sdk": "^9.0.3"
+    "@line/bot-sdk": "^9.0.3",
+    "tesseract.js": "^5.0.0"
   }
 }
