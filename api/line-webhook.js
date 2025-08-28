@@ -1,20 +1,19 @@
 // api/line-webhook.js
-// CommonJS + 簽章驗證（Production 強制）+ 圖片 OCR 擷取 A~J
+// CommonJS + 簽章驗證（Production 強制）+ 圖片 OCR 擷取 A~J（強化容錯）
 const crypto = require('crypto');
 const { Client } = require('@line/bot-sdk');
 const Tesseract = require('tesseract.js');
 
-// 需要的環境變數：LINE_CHANNEL_ACCESS_TOKEN、LINE_CHANNEL_SECRET
 const client = new Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
 });
 
-// ---------- 工具：讀 raw body 做簽章驗證 ----------
+// ---------- raw body & 簽章驗證 ----------
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
     req.setEncoding('utf8');
-    req.on('data', (chunk) => { data += chunk; });
+    req.on('data', (c) => { data += c; });
     req.on('end', () => resolve(data));
     req.on('error', reject);
   });
@@ -22,11 +21,8 @@ function readRawBody(req) {
 function verifySignature(secret, rawBody, signature) {
   if (!secret || !signature) return false;
   const mac = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(signature));
-  } catch {
-    return false;
-  }
+  try { return crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(signature)); }
+  catch { return false; }
 }
 
 // ---------- Webhook 入口 ----------
@@ -39,15 +35,13 @@ module.exports = async (req, res) => {
     const rawBody = await readRawBody(req);
     const signature = req.headers['x-line-signature'] || '';
     const secret = process.env.LINE_CHANNEL_SECRET || '';
-    const ok = verifySignature(secret, rawBody, signature);
 
+    const ok = verifySignature(secret, rawBody, signature);
     if (isProd && !ok) {
       console.warn('[webhook] bad signature (production)');
       return res.status(401).send('Bad signature');
     }
-    if (!isProd && !ok) {
-      console.warn('[webhook] signature failed (non-prod, allowed for testing)');
-    }
+    if (!isProd && !ok) console.warn('[webhook] signature failed (non-prod, allowed)');
 
     let body = {};
     try { body = rawBody ? JSON.parse(rawBody) : {}; } catch (e) { console.warn('JSON parse error', e); }
@@ -67,38 +61,37 @@ async function handleEvent(event) {
   const replyToken = event.replyToken;
   const userId = event?.source?.userId;
 
-  // 文字：解析 A~J
   if (event.message.type === 'text') {
     const scores = parseScoresFromText(event.message.text);
     if (!scores) {
-      await client.replyMessage(replyToken, {
-        type: 'text',
-        text: '請輸入 A~J 分數，例如：A:10, B:-20, C:30, D:0, E:75, F:10, G:-40, H:-25, I:5, J:20'
-      });
+      await client.replyMessage(replyToken, { type: 'text',
+        text: '請輸入 A~J 分數，例如：A:10, B:-20, C:30, D:0, E:75, F:10, G:-40, H:-25, I:5, J:20' });
       return;
     }
     await replyWithAnalysis(replyToken, scores);
     return;
   }
 
-  // 圖片：OCR 擷取 A~J
   if (event.message.type === 'image') {
-    // 先不讓 LINE 超時：回一則短訊
-    await client.replyMessage(replyToken, { type: 'text', text: '已收到圖片，我正在分析 OCA 分數（約 10~15 秒）…' });
-
+    // 先回覆以避免 LINE 的 1 分鐘限制
+    await client.replyMessage(replyToken, { type: 'text', text: '已收到圖片，我正在分析 OCA 分數（約 10~20 秒）…' });
     try {
       const buf = await downloadImageBuffer(event.message.id);
-      const partial = await ocrScoresFromBuffer(buf, 15000); // 15 秒保守上限
+      const { partial, rawText } = await ocrScoresFromBuffer(buf, 20000); // 20s
+      if (process.env.DEBUG_OCR_TEXT === '1' && userId) {
+        await safePush(userId, { type: 'text', text: `OCR 原文：\n${rawText?.slice(0, 1000) || '(empty)'}` });
+      }
       const scores = mergeIfComplete(partial);
-
       if (!scores) {
-        await safePush(userId, { type: 'text', text: '暫時無法從圖片辨識出完整的 A~J 分數。建議在圖片旁貼上文字分數，例如：A:10,B:-20,... 我就能立即分析。' });
+        await safePush(userId, { type: 'text',
+          text: '暫時無法從圖片辨識出完整的 A~J 分數。建議在圖片旁貼上文字分數，例如：A:10,B:-20,... 我就能立即分析。' });
         return;
       }
       await pushAnalysis(userId, scores);
     } catch (e) {
       console.error('[OCR] error', e);
-      await safePush(userId, { type: 'text', text: '分析圖片時遇到小狀況，請改用文字輸入 A~J 分數（例如 A:10,B:-20,...），我會立即回覆。' });
+      await safePush(userId, { type: 'text',
+        text: '分析圖片時遇到小狀況，請改用文字輸入 A~J 分數（例如 A:10,B:-20,...），我會立即回覆。' });
     }
   }
 }
@@ -114,13 +107,23 @@ async function downloadImageBuffer(messageId) {
   });
 }
 
-// ---------- OCR：從圖片萃取 A~J ----------
-async function ocrScoresFromBuffer(buf, timeoutMs = 15000) {
-  const p = Tesseract.recognize(buf, 'eng', { logger: () => {} });
+// ---------- OCR 強化 ----------
+async function ocrScoresFromBuffer(buf, timeoutMs = 20000) {
+  const options = {
+    logger: () => {},
+    // 使用官方 CDN，首次載入語料比較快
+    langPath: 'https://tessdata.projectnaptha.com/5',
+    // 只允許辨識這些字元，降低誤判
+    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:-=',
+    psm: 6 // Assume a single uniform block of text
+  };
+  const p = Tesseract.recognize(buf, 'eng', options);
   const res = await withTimeout(p, timeoutMs);
   const text = (res && res.data && res.data.text) ? res.data.text : '';
-  return extractScoresFromText(text);
+  const partial = extractScoresFromText(text);
+  return { partial, rawText: text };
 }
+
 function withTimeout(promise, ms) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('OCR timeout')), ms);
@@ -128,25 +131,39 @@ function withTimeout(promise, ms) {
            .catch((e) => { clearTimeout(t); reject(e); });
   });
 }
+
+// 文字正規化：半形化 + 統一符號 + 消除多餘空白
 function normalize(str) {
   if (!str) return '';
-  const full2half = s => s.replace(/[Ａ-Ｚ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
-  const unifyMinus = s => s.replace(/[−–—﹣－ーｰ~〜]/g, '-');
-  const unifyColon = s => s.replace(/[：;]/g, ':');
-  return unifyColon(unifyMinus(full2half(str))).replace(/\s+/g, ' ');
+  const full2halfAZ = s => s.replace(/[Ａ-Ｚ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+  const unifyMinus  = s => s.replace(/[−–—﹣－ーｰ~〜]/g, '-');
+  const unifyColon  = s => s.replace(/[：;＝=]/g, ':'); // 支援全形冒號與等號
+  const unifySpace  = s => s.replace(/\s+/g, ' ');
+  return unifySpace(unifyColon(unifyMinus(full2halfAZ(str))));
 }
+
+// 從任何文字中萃取「看起來像 A~J:數字」的片段（容錯版）
+// - 接受 : 或 = 作為分隔
+// - 容許 I 被誤辨為 1 或 L（先正規化後再對映）
 function extractScoresFromText(text) {
   const out = {};
-  const s = normalize(text);
-  const re = /([A-J])\s*:?\s*([+-]?\d{1,3})/gi;
+  let s = normalize(text);
+
+  // 常見誤辨：把 key「I」看成「1」或「L」
+  s = s.replace(/\b[1l]\s*:/gi, 'I:');
+
+  // A~J 或 1/L→I，分隔可為 : 或 =，數字允許 +/- 與 1~3 位
+  const re = /([A-J]|I)\s*[:=]?\s*([+-]?\d{1,3})/gi;
   let m;
   while ((m = re.exec(s))) {
-    const k = m[1].toUpperCase();
+    let k = m[1].toUpperCase();
+    if (k === 'L' || k === '1') k = 'I';
     const v = Math.max(-100, Math.min(100, parseInt(m[2], 10)));
     out[k] = v;
   }
   return out; // 可能只有部分鍵
 }
+
 function mergeIfComplete(partial) {
   if (!partial) return null;
   const keys = ['A','B','C','D','E','F','G','H','I','J'];
@@ -154,13 +171,13 @@ function mergeIfComplete(partial) {
   return ok ? keys.reduce((acc,k) => (acc[k] = partial[k], acc), {}) : null;
 }
 
-// ---------- 文字解析（複用上面的擷取器） ----------
+// ---------- 文字輸入（複用上面擷取器） ----------
 function parseScoresFromText(text) {
   const out = extractScoresFromText(text);
   return mergeIfComplete(out);
 }
 
-// ---------- 分析邏輯 ----------
+// ---------- 分析邏輯（同前） ----------
 function pickLabels(s) {
   const labels = [];
   if (s.C <= -20 && s.G <= -20 && s.H <= -20) labels.push('內耗型');
