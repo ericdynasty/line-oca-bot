@@ -3,6 +3,7 @@
   "private": true,
   "dependencies": {
     "@line/bot-sdk": "^9.0.3",
-    "tesseract.js": "^5.0.0"
+    "tesseract.js": "^5.0.0",
+    "tesseract.js-core": "^5.0.0"
   }
 }
