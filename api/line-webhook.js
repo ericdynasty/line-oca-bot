@@ -28,6 +28,7 @@ function verifySignature(secret, rawBody, signature) {
 
 // ====== Webhook 入口 ======
 module.exports = async (req, res) => {
+  // GET 用來快速健康檢查
   if (req.method !== 'POST') return res.status(200).send('OK');
 
   try {
@@ -116,7 +117,7 @@ async function ocrScoresFromBuffer(buf, timeoutMs = 20000) {
   const workerFsPath = require.resolve('tesseract.js/dist/worker.min.js');
   const coreFsPath   = require.resolve('tesseract.js-core/tesseract-core-simd.wasm');
 
-  // ⚠️ 關鍵：直接用絕對檔案路徑字串（Node Worker 接受），不要加 'file://'
+  // 直接用絕對檔案路徑字串（Node Worker 接受）
   const workerPath = workerFsPath;
   const corePath   = coreFsPath;
 
