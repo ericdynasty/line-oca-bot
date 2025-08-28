@@ -1,18 +1,52 @@
-// CommonJS 版本（Vercel 最穩）
+// CommonJS 版本 + 簽章驗證（適用 Vercel Serverless Functions）
+const crypto = require('crypto');
 const { Client } = require('@line/bot-sdk');
 
-// 不先做簽章驗證，確保能跑起來
 const client = new Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
 });
 
-module.exports = async (req, res) => {
-  if (req.method !== 'POST') {
-    // 用瀏覽器 GET /api/line-webhook 會看到 OK，代表路由存在
-    return res.status(200).send('OK');
-  }
+// 讀取 raw body（簽章要用「未修改的原始字串」）
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { data += chunk; });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+}
+
+// 驗證 LINE 簽章
+function verifySignature(secret, rawBody, signature) {
+  if (!secret || !signature) return false;
+  const hmac = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
   try {
-    const events = (req.body && req.body.events) || [];
+    return crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(signature));
+  } catch {
+    return false;
+  }
+}
+
+module.exports = async (req, res) => {
+  // 讓你用瀏覽器 GET /api/line-webhook 時看到 OK，確認路由存在
+  if (req.method !== 'POST') return res.status(200).send('OK');
+
+  try {
+    const secret = process.env.LINE_CHANNEL_SECRET || '';
+    const signature = req.headers['x-line-signature'] || '';
+
+    const rawBody = await readRawBody(req);
+
+    if (!verifySignature(secret, rawBody, signature)) {
+      console.warn('LINE signature verification failed');
+      return res.status(401).send('Bad signature');
+    }
+
+    // 驗證通過後再解析 JSON
+    const body = rawBody ? JSON.parse(rawBody) : {};
+    const events = Array.isArray(body.events) ? body.events : [];
+
     await Promise.all(events.map(handleEvent));
     return res.status(200).send('OK');
   } catch (err) {
@@ -21,6 +55,7 @@ module.exports = async (req, res) => {
   }
 };
 
+// ----------------- 以下為分析與回覆邏輯（與你原本一致） -----------------
 async function handleEvent(event) {
   if (event.type !== 'message') return;
   const replyToken = event.replyToken;
@@ -46,7 +81,6 @@ async function handleEvent(event) {
   }
 }
 
-// ---------- OCA 分析（簡化版） ----------
 function parseScoresFromText(text) {
   const map = {};
   const regex = /([A-J])\s*:?\s*(-?\d{1,3})/gi;
@@ -110,7 +144,7 @@ function buildPersona(s) {
   return { labels, pains: pains.length ? pains : ['整體平衡，持續小步快跑累積成就感即可。'], manicHints, gaps, talk };
 }
 
-// 這版用 QuickChart「網址」產圖，不需安裝任何套件
+// 用 QuickChart「網址」產圖，免安裝套件
 function buildChartUrl(s) {
   const labels = ['A','B','C','D','E','F','G','H','I','J'];
   const data = labels.map(k => s[k]);
@@ -130,10 +164,7 @@ function buildChartUrl(s) {
     },
     options: {
       plugins: { title: { display: true, text: 'OCA 曲線（含 Manic B/E 標註）' }, legend: { display: true } },
-      scales: {
-        y: { min: -100, max: 100, ticks: { stepSize: 20 } },
-        x: { grid: { display: false } }
-      }
+      scales: { y: { min: -100, max: 100, ticks: { stepSize: 20 } }, x: { grid: { display: false } } }
     }
   };
 
