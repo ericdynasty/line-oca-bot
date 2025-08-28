@@ -1,15 +1,15 @@
 // api/line-webhook.js
-// 簽章驗證（Production 強制）+ 圖片 OCR 擷取 A~J（使用 node_modules 實體路徑載 worker/wasm）
+// LINE 簽章驗證（Production 強制）+ 圖片 OCR 解析 OCA(A~J) + 圖表與分析回覆
 const crypto = require('crypto');
 const { Client } = require('@line/bot-sdk');
 const Tesseract = require('tesseract.js');
-const path = require('path');
 
+// ====== LINE Bot client ======
 const client = new Client({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
 });
 
-// ---------- raw body & 簽章驗證 ----------
+// ====== 讀 raw body 與簽章驗證 ======
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -26,7 +26,7 @@ function verifySignature(secret, rawBody, signature) {
   catch { return false; }
 }
 
-// ---------- Webhook 入口 ----------
+// ====== Webhook 入口 ======
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).send('OK');
 
@@ -55,7 +55,7 @@ module.exports = async (req, res) => {
   }
 };
 
-// ---------- 事件處理 ----------
+// ====== 事件處理 ======
 async function handleEvent(event) {
   if (event.type !== 'message') return;
 
@@ -100,7 +100,7 @@ async function handleEvent(event) {
   }
 }
 
-// ---------- 下載 LINE 圖片 ----------
+// ====== 下載 LINE 圖片 ======
 async function downloadImageBuffer(messageId) {
   const stream = await client.getMessageContent(messageId);
   const chunks = [];
@@ -111,13 +111,14 @@ async function downloadImageBuffer(messageId) {
   });
 }
 
-// ---------- OCR（使用 node_modules 絕對路徑 + file:// + 禁用 Blob URL） ----------
+// ====== OCR：用 node_modules 絕對路徑（不要加 file://），並禁用 Blob URL ======
 async function ocrScoresFromBuffer(buf, timeoutMs = 20000) {
   const workerFsPath = require.resolve('tesseract.js/dist/worker.min.js');
   const coreFsPath   = require.resolve('tesseract.js-core/tesseract-core-simd.wasm');
 
-  const workerPath = 'file://' + workerFsPath;
-  const corePath   = 'file://' + coreFsPath;
+  // ⚠️ 關鍵：直接用絕對檔案路徑字串（Node Worker 接受），不要加 'file://'
+  const workerPath = workerFsPath;
+  const corePath   = coreFsPath;
 
   console.log('[OCR] workerPath =', workerPath);
   console.log('[OCR] corePath   =', corePath);
@@ -126,7 +127,7 @@ async function ocrScoresFromBuffer(buf, timeoutMs = 20000) {
     logger: () => {},
     workerPath,
     corePath,
-    workerBlobURL: false,
+    workerBlobURL: false,                 // 強制走實體檔，不用 Blob URL
     langPath: 'https://tessdata.projectnaptha.com/5',
     tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:-=',
     psm: 6,
@@ -148,7 +149,7 @@ function withTimeout(promise, ms) {
   });
 }
 
-// 文字正規化：半形化 + 統一符號 + 消除多餘空白
+// ====== 文字正規化 & 擷取 A~J ======
 function normalize(str) {
   if (!str) return '';
   const full2halfAZ = s => s.replace(/[Ａ-Ｚ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
@@ -157,8 +158,6 @@ function normalize(str) {
   const unifySpace  = s => s.replace(/\s+/g, ' ');
   return unifySpace(unifyColon(unifyMinus(full2halfAZ(str))));
 }
-
-// 從任意文字萃取 A~J：支援 ":" 或 "="、容忍 I 被辨成 1/L
 function extractScoresFromText(text) {
   const out = {};
   let s = normalize(text);
@@ -174,21 +173,18 @@ function extractScoresFromText(text) {
   }
   return out;
 }
-
 function mergeIfComplete(partial) {
   if (!partial) return null;
   const keys = ['A','B','C','D','E','F','G','H','I','J'];
   const ok = keys.every(k => typeof partial[k] === 'number');
   return ok ? keys.reduce((acc,k) => (acc[k] = partial[k], acc), {}) : null;
 }
-
-// ---------- 文字輸入 ----------
 function parseScoresFromText(text) {
   const out = extractScoresFromText(text);
   return mergeIfComplete(out);
 }
 
-// ---------- 分析（同前） ----------
+// ====== 分析 ======
 function pickLabels(s) {
   const labels = [];
   if (s.C <= -20 && s.G <= -20 && s.H <= -20) labels.push('內耗型');
@@ -231,7 +227,7 @@ function buildPersona(s) {
   return { labels, pains: pains.length ? pains : ['整體平衡，持續小步快跑累積成就感即可。'], manicHints, gaps, talk };
 }
 
-// ---------- 圖表（QuickChart 網址） ----------
+// ====== 圖表（QuickChart 網址） & 文案 ======
 function buildChartUrl(s) {
   const labels = ['A','B','C','D','E','F','G','H','I','J'];
   const data = labels.map(k => s[k]);
@@ -257,7 +253,6 @@ function buildChartUrl(s) {
   });
   return `https://quickchart.io/chart?${params.toString()}`;
 }
-
 function analysisText(s, persona) {
   const lines = [];
   lines.push('🔎 OCA 分析（重點）');
@@ -275,7 +270,6 @@ function analysisText(s, persona) {
   lines.push(['A','B','C','D','E','F','G','H','I','J'].map(k => `${k}:${s[k]}`).join(', '));
   return lines.join('\n');
 }
-
 async function replyWithAnalysis(replyToken, scores) {
   const persona = buildPersona(scores);
   const chartUrl = buildChartUrl(scores);
