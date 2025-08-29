@@ -5,26 +5,18 @@ const crypto = require('crypto');
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
 const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
 
-// ★ 安全穩定的 BASE_URL（優先環境變數，其次 Vercel 變數，最後用你的正式網域）
+// 比以前更穩定：優先 PUBLIC_BASE_URL，其次 VERCEL_URL，最後你的正式網域
 const BASE_URL =
   process.env.PUBLIC_BASE_URL ||
   (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://line-oca-bot.vercel.app');
 
 const LETTERS = "ABCDEFGHIJ".split("");
 const NAMES = {
-  A: "A 自我",
-  B: "B 情緒",
-  C: "C 任務",
-  D: "D 關係",
-  E: "E 支援",
-  F: "F 壓力",
-  G: "G 目標",
-  H: "H 執行",
-  I: "I 自律",
-  J: "J 活力",
+  A: "A 自我", B: "B 情緒", C: "C 任務", D: "D 關係", E: "E 支援",
+  F: "F 壓力", G: "G 目標", H: "H 執行", I: "I 自律", J: "J 活力",
 };
 
-// --- 簡單 session（serverless 可能重啟，重啟後請用「填表」再啟動） ---
+// --- 輕量 session（serverless 會回收，重啟後請用「填表」再啟動） ---
 const SESS = new Map();
 // step: name | gender | age | date | maniaB | maniaE | scores | want
 
@@ -95,7 +87,7 @@ async function askDate(replyToken) {
     ]}
   }]);
 }
-// ★ 躁狂（B）
+// 躁狂（B）
 async function askManiaB(replyToken) {
   await replyMessage(replyToken, [{
     type:'text',
@@ -106,7 +98,7 @@ async function askManiaB(replyToken) {
     ]}
   }]);
 }
-// ★ 躁狂（E）
+// 躁狂（E）
 async function askManiaE(replyToken) {
   await replyMessage(replyToken, [{
     type:'text',
@@ -117,11 +109,11 @@ async function askManiaE(replyToken) {
     ]}
   }]);
 }
+// ★ 這裡改文案：請輸入「X點（-100～100）的分數。」（X = A~J）
 async function askScore(replyToken, letter) {
-  const name = NAMES[letter] || letter;
   await replyMessage(replyToken, [{
     type:'text',
-    text:`請輸入 ${name}（-100 ~ 100）的分數：`,
+    text:`請輸入 ${letter} 點（-100～100）的分數。`,
     quickReply:{ items:[
       { type:'action', action:{ type:'message', label:'-50', text:'-50' } },
       { type:'action', action:{ type:'message', label:'-25', text:'-25' } },
@@ -144,14 +136,23 @@ async function askWants(replyToken) {
   }]);
 }
 
+// 加入逾時保護（12 秒），避免永遠卡在「分析處理中」
 async function submitToApi(payload) {
-  const resp = await fetch(`${BASE_URL}/api/submit-oca`, {
-    method:'POST',
-    headers:{ 'Content-Type':'application/json' },
-    body: JSON.stringify(payload)
-  });
-  const text = await resp.text().catch(()=> '');
-  return { ok: resp.ok, status: resp.status, text };
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 12000);
+
+  try {
+    const resp = await fetch(`${BASE_URL}/api/submit-oca`, {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify(payload),
+      signal: ac.signal
+    });
+    const text = await resp.text().catch(()=> '');
+    return { ok: resp.ok, status: resp.status, text };
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 module.exports = async (req, res) => {
@@ -227,14 +228,12 @@ module.exports = async (req, res) => {
             st.step = 'maniaB'; await askManiaB(ev.replyToken); continue;
           }
 
-          // ★ 躁狂（B）
           if (st.step === 'maniaB') {
             if (!/^(有|無)$/.test(text)) { await askManiaB(ev.replyToken); continue; }
             d.maniaB = text === '有';
             st.step = 'maniaE'; await askManiaE(ev.replyToken); continue;
           }
 
-          // ★ 躁狂（E）
           if (st.step === 'maniaE') {
             if (!/^(有|無)$/.test(text)) { await askManiaE(ev.replyToken); continue; }
             d.maniaE = text === '有';
@@ -259,7 +258,7 @@ module.exports = async (req, res) => {
           }
 
           if (st.step === 'want') {
-            if (/^全部$/.test(text)) {
+            if (/^(全部|全都|ALL)$/i.test(text)) {
               d.wants = { single:true, combo:true, persona:true };
             } else {
               if (/A~J\s*單點/.test(text)) d.wants.single = true;
@@ -271,13 +270,13 @@ module.exports = async (req, res) => {
             }
 
             await replyMessage(ev.replyToken, [{ type:'text', text:'分析處理中，請稍候…' }]);
+
             const payload = {
               userId,
               name: d.name || '',
               gender: d.gender || '',
               age: d.age,
               date: d.date || '',
-              // ★ 兩個躁狂
               maniaB: !!d.maniaB,
               maniaE: !!d.maniaE,
               scores: d.scores,
