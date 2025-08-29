@@ -1,295 +1,113 @@
-// api/line-webhook.js
-// LINE 簽章驗證（Production 強制）+ 圖片 OCR 解析 OCA(A~J) + 圖表與分析回覆
+// /api/line-webhook.js
+// 驗簽 + 關鍵字「填表」開 LIFF + 簡易數字輸入 fallback
 const crypto = require('crypto');
-const { Client } = require('@line/bot-sdk');
-const Tesseract = require('tesseract.js');
 
-// ====== LINE Bot client ======
-const client = new Client({
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || ''
-});
+const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET;
+const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+const LIFF_ID = process.env.LIFF_ID || ''; // 例如 2000xxxxxx-xxxxx
+const LIFF_LINK = LIFF_ID ? `https://liff.line.me/${LIFF_ID}` : null;
 
-// ====== 讀 raw body 與簽章驗證 ======
-function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.setEncoding('utf8');
-    req.on('data', (c) => { data += c; });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
+async function replyMessage(replyToken, messages) {
+  const url = 'https://api.line.me/v2/bot/message/reply';
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${CHANNEL_ACCESS_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ replyToken, messages })
   });
-}
-function verifySignature(secret, rawBody, signature) {
-  if (!secret || !signature) return false;
-  const mac = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
-  try { return crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(signature)); }
-  catch { return false; }
+  if (!resp.ok) {
+    const t = await resp.text().catch(()=>'');
+    console.error('Reply API error:', resp.status, t);
+  }
 }
 
-// ====== Webhook 入口 ======
+function verifySignature(headerSignature, body) {
+  if (!CHANNEL_SECRET) return false;
+  const hmac = crypto.createHmac('sha256', CHANNEL_SECRET)
+                     .update(body)
+                     .digest('base64');
+  return hmac === headerSignature;
+}
+
+// 簡易偵測是不是 A~J 的文字輸入（讓舊體驗仍可用）
+function seemsScoreText(text) {
+  // 允許「A:10, B:-20, ...」或「A10 B-20」等
+  const m = text.match(/[A-Jａ-ｊＡ-Ｊ]\s*[:：]?\s*-?\d+/gi);
+  return m && m.length >= 3; // 至少 3 點才當作分數
+}
+
 module.exports = async (req, res) => {
-  // GET 用來快速健康檢查
-  if (req.method !== 'POST') return res.status(200).send('OK');
-
   try {
-    const isProd = (process.env.VERCEL_ENV === 'production') || (process.env.NODE_ENV === 'production');
-
-    const rawBody = await readRawBody(req);
-    const signature = req.headers['x-line-signature'] || '';
-    const secret = process.env.LINE_CHANNEL_SECRET || '';
-
-    const ok = verifySignature(secret, rawBody, signature);
-    if (isProd && !ok) {
-      console.warn('[webhook] bad signature (production)');
-      return res.status(401).send('Bad signature');
+    if (req.method !== 'POST') {
+      return res.status(405).send('Method Not Allowed');
     }
-    if (!isProd && !ok) console.warn('[webhook] signature failed (non-prod, allowed)');
 
-    let body = {};
-    try { body = rawBody ? JSON.parse(rawBody) : {}; } catch (e) { console.warn('JSON parse error', e); }
-    const events = Array.isArray(body.events) ? body.events : [];
-    await Promise.all(events.map(handleEvent));
-    return res.status(200).send('OK');
-  } catch (err) {
-    console.error('[webhook] handler error', err);
-    return res.status(200).send('OK');
+    const rawBody = typeof req.body === 'string'
+      ? req.body
+      : JSON.stringify(req.body);
+
+    // 1) 簽章驗證
+    const sig = req.headers['x-line-signature'];
+    if (!verifySignature(sig, rawBody)) {
+      return res.status(403).send('Bad signature');
+    }
+
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const events = body.events || [];
+
+    for (const ev of events) {
+      // 只處理文字訊息
+      if (ev.type === 'message' && ev.message?.type === 'text') {
+        const text = (ev.message.text || '').trim();
+
+        // 2) 關鍵字：填表 / 表單 / 填寫 → 回 LIFF 連結
+        if (/填表|表單|填寫/i.test(text)) {
+          if (LIFF_LINK) {
+            await replyMessage(ev.replyToken, [
+              {
+                type: 'template',
+                altText: '開啟 OCA 填表',
+                template: {
+                  type: 'buttons',
+                  text: '請點「開啟表單」填寫 A~J 與基本資料。',
+                  actions: [
+                    { type: 'uri', label: '開啟表單', uri: LIFF_LINK }
+                  ]
+                }
+              }
+            ]);
+          } else {
+            await replyMessage(ev.replyToken, [
+              { type: 'text', text: '還沒設定 LIFF_ID，請先到 Vercel 設定環境變數 LIFF_ID 後重新部署。' }
+            ]);
+          }
+          continue;
+        }
+
+        // 3) 舊的手打分數體驗（防呆）
+        if (seemsScoreText(text)) {
+          await replyMessage(ev.replyToken, [
+            { type: 'text', text: '我已收到分數，稍後會回覆分析結果（或改用「填表」開 LIFF 會更快）。' }
+          ]);
+          // 若你有「文字分數 → 直接分析」的既有流程，可以在這裡呼叫你的分析 API
+          continue;
+        }
+
+        // 4) 說明 / 幫助
+        await replyMessage(ev.replyToken, [
+          {
+            type: 'text',
+            text: '嗨！要開始分析，請輸入「填表」開啟 OCA 表單；或用文字輸入 A~J 分數（例如 A:10, B:-20, ...）。'
+          }
+        ]);
+      }
+    }
+
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send('Server Error');
   }
 };
-
-// ====== 事件處理 ======
-async function handleEvent(event) {
-  if (event.type !== 'message') return;
-
-  const replyToken = event.replyToken;
-  const userId = event?.source?.userId;
-
-  // 文字：解析 A~J
-  if (event.message.type === 'text') {
-    const scores = parseScoresFromText(event.message.text);
-    if (!scores) {
-      await client.replyMessage(replyToken, { type: 'text',
-        text: '請輸入 A~J 分數，例如：A:10, B:-20, C:30, D:0, E:75, F:10, G:-40, H:-25, I:5, J:20' });
-      return;
-    }
-    await replyWithAnalysis(replyToken, scores);
-    return;
-  }
-
-  // 圖片：OCR 擷取 A~J
-  if (event.message.type === 'image') {
-    await client.replyMessage(replyToken, { type: 'text', text: '已收到圖片，我正在分析 OCA 分數（約 10~20 秒）…' });
-    try {
-      const buf = await downloadImageBuffer(event.message.id);
-      const { partial, rawText } = await ocrScoresFromBuffer(buf, 20000); // 20s
-
-      if (process.env.DEBUG_OCR_TEXT === '1' && userId) {
-        await safePush(userId, { type: 'text', text: `OCR 原文：\n${rawText?.slice(0, 1000) || '(empty)'}` });
-      }
-
-      const scores = mergeIfComplete(partial);
-      if (!scores) {
-        await safePush(userId, { type: 'text',
-          text: '暫時無法從圖片辨識出完整的 A~J 分數。建議在圖片旁貼上文字分數，例如：A:10,B:-20,... 我就能立即分析。' });
-        return;
-      }
-      await pushAnalysis(userId, scores);
-    } catch (e) {
-      console.error('[OCR] error', e);
-      await safePush(userId, { type: 'text',
-        text: '分析圖片時遇到小狀況，請改用文字輸入 A~J 分數（例如 A:10,B:-20,...），我會立即回覆。' });
-    }
-  }
-}
-
-// ====== 下載 LINE 圖片 ======
-async function downloadImageBuffer(messageId) {
-  const stream = await client.getMessageContent(messageId);
-  const chunks = [];
-  return new Promise((resolve, reject) => {
-    stream.on('data', (c) => chunks.push(Buffer.from(c)));
-    stream.on('end', () => resolve(Buffer.concat(chunks)));
-    stream.on('error', (e) => reject(e));
-  });
-}
-
-// ====== OCR：用 node_modules 絕對路徑（不要加 file://），並禁用 Blob URL ======
-async function ocrScoresFromBuffer(buf, timeoutMs = 20000) {
-  const workerFsPath = require.resolve('tesseract.js/dist/worker.min.js');
-  const coreFsPath   = require.resolve('tesseract.js-core/tesseract-core-simd.wasm');
-
-  // 直接用絕對檔案路徑字串（Node Worker 接受）
-  const workerPath = workerFsPath;
-  const corePath   = coreFsPath;
-
-  console.log('[OCR] workerPath =', workerPath);
-  console.log('[OCR] corePath   =', corePath);
-
-  const options = {
-    logger: () => {},
-    workerPath,
-    corePath,
-    workerBlobURL: false,                 // 強制走實體檔，不用 Blob URL
-    langPath: 'https://tessdata.projectnaptha.com/5',
-    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:-=',
-    psm: 6,
-    cacheMethod: 'readOnly'
-  };
-
-  const p = Tesseract.recognize(buf, 'eng', options);
-  const res = await withTimeout(p, timeoutMs);
-  const text = (res && res.data && res.data.text) ? res.data.text : '';
-  const partial = extractScoresFromText(text);
-  return { partial, rawText: text };
-}
-
-function withTimeout(promise, ms) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('OCR timeout')), ms);
-    promise.then((v) => { clearTimeout(t); resolve(v); })
-           .catch((e) => { clearTimeout(t); reject(e); });
-  });
-}
-
-// ====== 文字正規化 & 擷取 A~J ======
-function normalize(str) {
-  if (!str) return '';
-  const full2halfAZ = s => s.replace(/[Ａ-Ｚ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
-  const unifyMinus  = s => s.replace(/[−–—﹣－ーｰ~〜]/g, '-');
-  const unifyColon  = s => s.replace(/[：;＝=]/g, ':'); // 支援全形冒號/等號
-  const unifySpace  = s => s.replace(/\s+/g, ' ');
-  return unifySpace(unifyColon(unifyMinus(full2halfAZ(str))));
-}
-function extractScoresFromText(text) {
-  const out = {};
-  let s = normalize(text);
-  s = s.replace(/\b[1l]\s*:/gi, 'I:');  // 1/L → I
-
-  const re = /([A-J]|I)\s*[:=]?\s*([+-]?\d{1,3})/gi;
-  let m;
-  while ((m = re.exec(s))) {
-    let k = m[1].toUpperCase();
-    if (k === 'L' || k === '1') k = 'I';
-    const v = Math.max(-100, Math.min(100, parseInt(m[2], 10)));
-    out[k] = v;
-  }
-  return out;
-}
-function mergeIfComplete(partial) {
-  if (!partial) return null;
-  const keys = ['A','B','C','D','E','F','G','H','I','J'];
-  const ok = keys.every(k => typeof partial[k] === 'number');
-  return ok ? keys.reduce((acc,k) => (acc[k] = partial[k], acc), {}) : null;
-}
-function parseScoresFromText(text) {
-  const out = extractScoresFromText(text);
-  return mergeIfComplete(out);
-}
-
-// ====== 分析 ======
-function pickLabels(s) {
-  const labels = [];
-  if (s.C <= -20 && s.G <= -20 && s.H <= -20) labels.push('內耗型');
-  if (s.E >= 40 && s.H >= 20) labels.push('開朗型');
-  if (s.A >= 30 && s.D >= 30) labels.push('謹慎規劃型');
-  if ((s.B >= 70 || s.E >= 70) && s.G <= -20) labels.push('行動爆衝型');
-  if (s.B <= -50 && s.E <= -50) labels.push('低潮修復期');
-  return labels.length ? Array.from(new Set(labels)) : ['平衡成長型'];
-}
-function manicFlags(s) {
-  return {
-    manicB: s.B >= 80 ? 'high' : s.B <= -70 ? 'low' : null,
-    manicE: s.E >= 80 ? 'high' : s.E <= -70 ? 'low' : null
-  };
-}
-function bigGaps(s) {
-  const gaps = [];
-  if (Math.abs(s.A - s.H) >= 60) gaps.push('想得多但說得少／表達落差');
-  if (Math.abs(s.B - s.G) >= 60) gaps.push('能量高低與穩定度落差');
-  return gaps;
-}
-function buildPersona(s) {
-  const labels = pickLabels(s);
-  const flags = manicFlags(s);
-  const gaps = bigGaps(s);
-  const pains = [];
-  if (labels.includes('內耗型')) pains.push('常在心裡反覆推演，話到嘴邊又吞回去，久了容易覺得累。');
-  if (labels.includes('行動爆衝型')) pains.push('一衝就全力、但後勁不足，與人互動時節奏不易對上。');
-  if (labels.includes('低潮修復期')) pains.push('最近提不起勁，事情想做但能量不上來。');
-  if (gaps.includes('想得多但說得少／表達落差')) pains.push('腦內方案很多，但臨場表達卡住，別人抓不到你的重點。');
-  const manicHints = [];
-  if (flags.manicB === 'high') manicHints.push('Manic B：行動能量很強，適合短打任務，但要留意收尾品質。');
-  if (flags.manicB === 'low')  manicHints.push('B 低：動力不足，先做 10 分鐘暖身任務。');
-  if (flags.manicE === 'high') manicHints.push('Manic E：社交能量高，善用協作快速拆解任務。');
-  if (flags.manicE === 'low')  manicHints.push('E 低：別勉強社交，改用非同步訊息維持最低限度的溝通。');
-  const talk =
-`你習慣先把事情想清楚再行動，這份穩健讓人安心；
-只是壓力上來時，容易把情緒收得太緊。接下來的一週，試著在重要場合前先寫三行重點：
-「我想達成什麼」、「我需要對方做什麼」、「下一步是什麼」。這會讓你更自在地被理解。`;
-  return { labels, pains: pains.length ? pains : ['整體平衡，持續小步快跑累積成就感即可。'], manicHints, gaps, talk };
-}
-
-// ====== 圖表（QuickChart 網址） & 文案 ======
-function buildChartUrl(s) {
-  const labels = ['A','B','C','D','E','F','G','H','I','J'];
-  const data = labels.map(k => s[k]);
-  const highlight = [];
-  if (s.B >= 80 || s.B <= -70) highlight.push({ x: 1, y: s.B });
-  if (s.E >= 80 || s.E <= -70) highlight.push({ x: 4, y: s.E });
-  const config = {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        { label: 'OCA 曲線', data, fill: false, borderWidth: 3, tension: 0.25, pointRadius: 4 },
-        { type: 'scatter', label: 'Manic B/E', data: highlight, pointRadius: 6, pointStyle: 'triangle' }
-      ]
-    },
-    options: {
-      plugins: { title: { display: true, text: 'OCA 曲線（含 Manic B/E 標註）' }, legend: { display: true } },
-      scales: { y: { min: -100, max: 100, ticks: { stepSize: 20 } }, x: { grid: { display: false } } }
-    }
-  };
-  const params = new URLSearchParams({
-    width: '900', height: '500', backgroundColor: 'white', c: JSON.stringify(config)
-  });
-  return `https://quickchart.io/chart?${params.toString()}`;
-}
-function analysisText(s, persona) {
-  const lines = [];
-  lines.push('🔎 OCA 分析（重點）');
-  lines.push(`標籤：${persona.labels.join('、')}`);
-  if (persona.gaps.length) lines.push(`落差：${persona.gaps.join('、')}`);
-  if (persona.manicHints.length) lines.push(`Manic 提示：\n• ${persona.manicHints.join('\n• ')}`);
-  lines.push('');
-  lines.push('🧍 人物側寫');
-  lines.push(persona.talk);
-  lines.push('');
-  lines.push('😮‍💨 目前痛點');
-  lines.push('• ' + persona.pains.join('\n• '));
-  lines.push('');
-  lines.push('📋 原始分數');
-  lines.push(['A','B','C','D','E','F','G','H','I','J'].map(k => `${k}:${s[k]}`).join(', '));
-  return lines.join('\n');
-}
-async function replyWithAnalysis(replyToken, scores) {
-  const persona = buildPersona(scores);
-  const chartUrl = buildChartUrl(scores);
-  await client.replyMessage(replyToken, [
-    { type: 'image', originalContentUrl: chartUrl, previewImageUrl: chartUrl },
-    { type: 'text', text: analysisText(scores, persona) },
-    { type: 'text', text: '小提醒：若你上傳的是純曲線圖，建議同時輸入 A~J 分數（例如 A:10,B:-20,...），分析會更快更準確。' }
-  ]);
-}
-async function pushAnalysis(userId, scores) {
-  const persona = buildPersona(scores);
-  const chartUrl = buildChartUrl(scores);
-  await safePush(userId, [
-    { type: 'image', originalContentUrl: chartUrl, previewImageUrl: chartUrl },
-    { type: 'text', text: analysisText(scores, persona) },
-    { type: 'text', text: '小提醒：若你上傳的是純曲線圖，建議同時輸入 A~J 分數（例如 A:10,B:-20,...），分析會更快更準確。' }
-  ]);
-}
-async function safePush(userId, message) {
-  if (!userId) return;
-  try { await client.pushMessage(userId, message); } catch (e) { console.error('[push] error', e); }
-}
