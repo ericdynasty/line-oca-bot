@@ -1,89 +1,122 @@
-// /api/submit-oca.js
-// 接收 LIFF 表單的 JSON、做欄位驗證、用 Messaging API 推播結果給用戶
-const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+// api/submit-oca.js
+// 不讀外部 JSON；內建極簡規則 + 推播回覆
+const LETTERS = "ABCDEFGHIJ".split("");
+const NAMES = {
+  A: "A 自我",
+  B: "B 情緒",
+  C: "C 任務",
+  D: "D 關係",
+  E: "E 支援",
+  F: "F 壓力",
+  G: "G 目標",
+  H: "H 執行",
+  I: "I 自律",
+  J: "J 活力",
+};
 
-// 讀 raw body -> 解析 JSON（避免 body-parser 差異造成解析不到）
-async function readJson(req) {
-  const chunks = [];
-  for await (const c of req) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
-  const raw = Buffer.concat(chunks).toString('utf8');
-  try {
-    return { raw, data: JSON.parse(raw) };
-  } catch (e) {
-    throw new Error('JSON 內容無法解析');
+function normalizeScores(input) {
+  const out = {};
+  for (const L of LETTERS) {
+    const v = Number(input?.[L]);
+    out[L] = Number.isFinite(v) ? v : 0;
   }
+  return out;
+}
+
+// 依分數回傳「帶方向的等級」與簡短文字（極簡版，不代表教材正式句庫）
+function bandDesc(n) {
+  if (n >= 41) return ["高(重)", "偏強勢、驅動力大"];
+  if (n >= 11) return ["高(輕)", "略偏高、傾向較明顯"];
+  if (n <= -41) return ["低(重)", "不足感明顯、需特別留意"];
+  if (n <= -11) return ["低(輕)", "略偏低、偶爾受影響"];
+  return ["中性", "較平衡、影響小"];
+}
+
+// 最簡綜合：抓「絕對值」最大的 2~3 點，當成痛點/強項線索
+function topLetters(scores, k = 3) {
+  return Object.entries(scores)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .slice(0, k);
 }
 
 async function pushMessage(to, messages) {
-  const resp = await fetch('https://api.line.me/v2/bot/message/push', {
-    method: 'POST',
+  const resp = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
     headers: {
-      'Authorization': `Bearer ${CHANNEL_ACCESS_TOKEN}`,
-      'Content-Type': 'application/json'
+      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify({ to, messages })
+    body: JSON.stringify({ to, messages }),
   });
   if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    console.error('Push API error:', resp.status, t);
-    throw new Error(`Push 失敗：${resp.status}`);
+    console.error("Push API error:", resp.status, await resp.text().catch(() => ""));
   }
-}
-
-function validatePayload(p) {
-  // 必填：userId（從 LIFF 取得）、姓名、年齡(>=14)、A~J 分數（-100~100）
-  if (!p) throw new Error('內容為空');
-  const { userId, name, age, sex, date, scores } = p;
-
-  if (!userId) throw new Error('找不到 userId，請從與機器人的 1對1 聊天內開啟表單（不要用外部瀏覽器）');
-  if (!name || !String(name).trim()) throw new Error('姓名必填');
-  const a = Number(age);
-  if (!Number.isFinite(a) || a < 14) throw new Error('年齡需 ≥ 14');
-
-  // 驗分數
-  const letters = 'ABCDEFGHIJ'.split('');
-  if (!scores || typeof scores !== 'object') throw new Error('缺少分數');
-  for (const k of letters) {
-    const v = Number(scores[k]);
-    if (!Number.isFinite(v) || v < -100 || v > 100) {
-      throw new Error(`分數 ${k} 必須在 -100 ~ 100（目前：${scores[k]}）`);
-    }
-  }
-  return { userId, name: String(name).trim(), age: a, sex: sex || '', date: date || '', letters };
 }
 
 module.exports = async (req, res) => {
   try {
-    if (req.method !== 'POST') {
-      return res.status(405).json({ error: 'Method Not Allowed' });
-    }
-    if (!CHANNEL_ACCESS_TOKEN) {
-      return res.status(500).json({ error: '後端未設定 LINE_CHANNEL_ACCESS_TOKEN' });
+    if (req.method !== "POST") {
+      return res.status(405).send("Method Not Allowed");
     }
 
-    const { data } = await readJson(req);
-    // 你的前端應該送上：{ userId, name, age, sex, date, scores:{A..J}, mania:bool, wantSingle, wantSynth, wantPersona }
-    const { userId, name, age, sex, date, letters } = validatePayload(data);
+    const { userId, name, gender, age, date, mania, scores: raw, wants } = req.body || {};
+    if (!userId) return res.status(400).json({ ok: false, msg: "缺少 userId" });
+    if (!age || Number(age) < 14) return res.status(400).json({ ok: false, msg: "年齡需 ≥ 14" });
 
-    // 這裡先用「確認單」訊息推回（之後你再把規則/AI 分析塞進來）
-    const scoreText = letters.map(k => `${k}:${data.scores[k]}`).join(', ');
-    const maniaText = data.mania ? '（有勾躁狂）' : '';
-    const lines = [
-      `✅ 已收到資料：`,
-      `姓名：${name}（${sex || '—'}，${age}歲）`,
-      `日期：${date || '—'} ${maniaText}`,
-      `分數：${scoreText}`,
-      '',
-      '稍後我會根據你的勾選項目回覆分析結果。'
-    ];
+    // 分數容錯：沒填一律當 0（若你想嚴格必填，把這段換成檢查）
+    const scores = normalizeScores(raw);
 
-    await pushMessage(userId, [{ type: 'text', text: lines.join('\n') }]);
+    // 產出單點（簡短）
+    const singleLines = [];
+    for (const L of LETTERS) {
+      const n = scores[L];
+      const [lvl, hint] = bandDesc(n);
+      singleLines.push(`${NAMES[L]}：${n}（${lvl}）— ${hint}`);
+    }
 
-    // 也回給 LIFF 一個成功訊息（前端會 alert 或顯示）
+    // 簡易綜合與痛點：列出前三個絕對值大者
+    const tops = topLetters(scores, 3);
+    const topText = tops
+      .map(([L, v]) => `${NAMES[L]}：${v}（${bandDesc(v)[0]}）`)
+      .join("、");
+
+    const combined =
+      `【綜合重點】\n最需要留意／最有影響的面向：${topText || "無特別突出"}。\n` +
+      `躁狂傾向：${mania ? "有" : "無"}；日期：${date || "未填"}。`;
+
+    // 超簡人物側寫：用前兩名做口語化描述（僅示意）
+    let persona = "【人物側寫】\n";
+    if (tops.length >= 2) {
+      const [L1, v1] = tops[0];
+      const [L2, v2] = tops[1];
+      const dir1 = v1 >= 0 ? "偏高" : "偏低";
+      const dir2 = v2 >= 0 ? "偏高" : "偏低";
+      persona += `${NAMES[L1]}${dir1}、${NAMES[L2]}${dir2}；整體呈現「${dir1 === "偏高" ? "主動" : "保守"}、${dir2 === "偏高" ? "外放" : "內斂"}」傾向（示意）。`;
+    } else {
+      persona += "整體表現較均衡。";
+    }
+
+    // 組裝回覆內容（避免過長，切成多段）
+    const replyChunks = [];
+    replyChunks.push({ type: "text", text: `Hi ${name || ""}！已收到你的 OCA 分數。\n（年齡：${age}，性別：${gender || "未填"}）` });
+
+    if (!wants || wants.single) {
+      const txt = "【A~J 單點】\n" + singleLines.join("\n");
+      replyChunks.push({ type: "text", text: txt.slice(0, 5000) });
+    }
+    if (!wants || wants.combo) {
+      replyChunks.push({ type: "text", text: combined.slice(0, 5000) });
+    }
+    if (!wants || wants.persona) {
+      replyChunks.push({ type: "text", text: persona.slice(0, 5000) });
+    }
+
+    // 推播給使用者
+    await pushMessage(userId, replyChunks);
+
     return res.status(200).json({ ok: true });
   } catch (e) {
-    console.error('submit-oca error:', e);
-    // 回更具體訊息給前端
-    return res.status(500).json({ error: e.message || 'Server Error' });
+    console.error(e);
+    return res.status(500).send("Server Error");
   }
 };
