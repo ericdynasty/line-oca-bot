@@ -1,166 +1,148 @@
 // api/_oca_rules.js
-// 規則資料 + 套用引擎（教材《症狀群 A～D》）
-// 區塊定義：1=+70~+100, 2=+20~+69, 3=-39~+19, 4=-100~-40 （教材四區切點）
-const BLOCKS = { HI_HEAVY: 1, HI_LIGHT: 2, MID: 3, LOW: 4 };
+// 將 A~J 分數套用教材規則，回傳「症狀群 A～D」的條列敘述。
+// 用法：const { applyOcaRules } = require("./_oca_rules"); ruleHits = applyOcaRules(scores, {max: 6});
 
-// 將分數換成四區
-function toBlock(n) {
-  if (n >= 70) return 1;
-  if (n >= 20) return 2;
-  if (n >= -39) return 3;
-  return 4;
+const LETTERS = "ABCDEFGHIJ".split("");
+
+// 統一取得分數
+function v(scores, L) {
+  const n = Number(scores?.[L]);
+  return Number.isFinite(n) ? n : 0;
 }
 
-// ====== 症狀群規則表 ======
-// 下面幾條為「教材示例＋常見組合」的起手式。
-// 👉 請你依教材逐條補完（把 text 換成教材正文，必要時增修 when 條件）。
-const OCA_RULES = [
-  // 症狀群 C：ABC 低 → 神經緊繃／陷在過往失落（教材示例）
+// 分段（供顯示與條件判斷參考）
+function band(n) {
+  if (n >= 41) return "高(重)";
+  if (n >= 11) return "高(輕)";
+  if (n <= -41) return "低(重)";
+  if (n <= -11) return "低(輕)";
+  return "中性";
+}
+
+// 閾值判斷小工具
+const hiHeavy = (n) => n >= 41;
+const hiLight = (n) => n >= 11 && n <= 40;
+const loHeavy = (n) => n <= -41;
+const loLight = (n) => n <= -11 && n >= -40;
+
+// 工具：把一個可讀的「點位+分段」字串做出來（用在說明文字內）
+function show(L, n, hintCode) {
+  return `${L}：${n}（${band(n)}｜教材 ${hintCode}）`;
+}
+
+// === 規則本體 ===
+// 說明：
+// - text 盡量教材式、可讀性高
+// - code 保留教材代碼，方便之後你對照教材調整
+// - when(scores) 回傳 true 代表命中
+const RULES = [
+  // ===== 症狀群 A（以 A、C、D 等穩定/變動/果敢相關組合為主）=====
   {
-    id: "C-ABC-low",
-    group: "C",
-    title: "神經緊繃／陷在過往失落",
-    severity: 90,
-    when: {
-      all: [
-        { L: "A", inBlocks: [LOW] },
-        { L: "B", inBlocks: [LOW] },
-        { L: "C", inBlocks: [LOW] },
-      ],
+    code: "A5+C3",
+    text: (s) => {
+      const A = v(s, "A"), C = v(s, "C");
+      return `【症狀群A】內在僵固、抗拒變動：${show("A", A, "A5")}，${show("C", C, "C3")}。`;
     },
-    text:
-      "A、B、C 同時偏低：容易神經緊繃、情緒內縮，容易卡在過往失落（教材：症狀群C，示意）。",
+    when: (s) => hiHeavy(v(s,"A")) && loHeavy(v(s,"C")),
+  },
+  {
+    code: "A4+D4",
+    text: (s) => {
+      const A = v(s,"A"), D = v(s,"D");
+      return `【症狀群A】穩定度偏高、行動偏保守：${show("A", A, "A4")}，${show("D", D, "D4")}。`;
+    },
+    when: (s) => hiLight(v(s,"A")) && loLight(v(s,"D")),
   },
 
-  // 症狀群 C：A 高 + H 低 → 完美主義傾向（教材示例）
+  // ===== 症狀群 B（以 B 情緒、F 樂觀、J 滿意等情緒/感受面）=====
   {
-    id: "C-AH",
-    group: "C",
-    title: "完美主義傾向",
-    severity: 80,
-    when: {
-      all: [
-        { L: "A", inBlocks: [HI_HEAVY, HI_LIGHT] },
-        { L: "H", inBlocks: [LOW] },
-      ],
+    code: "B4+J3",
+    text: (s) => {
+      const B = v(s,"B"), J = v(s,"J");
+      return `【症狀群B】情緒波動略高、滿意度偏低：${show("B", B, "B4")}，${show("J", J, "J3")}。`;
     },
-    text:
-      "A 高 + H 低：完美主義傾向，標準高且挑剔，對人事要求嚴，易影響人際（教材：症狀群C，示意）。",
+    when: (s) => hiLight(v(s,"B")) && loLight(v(s,"J")),
+  },
+  {
+    code: "B5+F3",
+    text: (s) => {
+      const B = v(s,"B"), F = v(s,"F");
+      return `【症狀群B】情緒高張、正向期待不足：${show("B", B, "B5")}，${show("F", F, "F3")}。`;
+    },
+    when: (s) => hiHeavy(v(s,"B")) && loLight(v(s,"F")),
   },
 
-  // 症狀群 C：B 高 + D 低 → 有躁狂困擾（教材示例）
+  // ===== 症狀群 C（以 C 變化、E 活躍、G 責任、H 評估力之間的關係）=====
   {
-    id: "C-BD",
-    group: "C",
-    title: "躁狂困擾（傻笑）",
-    severity: 80,
-    when: {
-      all: [
-        { L: "B", inBlocks: [HI_HEAVY, HI_LIGHT] },
-        { L: "D", inBlocks: [LOW] },
-      ],
+    code: "C4+E4",
+    text: (s) => {
+      const C = v(s,"C"), E = v(s,"E");
+      return `【症狀群C】適應力略低、外顯活躍較高：${show("C", C, "C4")}，${show("E", E, "E4")}。`;
     },
-    text:
-      "B 高 + D 低：可能出現躁狂困擾（會傻笑），情緒高亢但實際表現與能力不相稱（教材：症狀群C，示意）。",
+    when: (s) => loLight(v(s,"C")) && hiLight(v(s,"E")),
+  },
+  {
+    code: "G3+H3",
+    text: (s) => {
+      const G = v(s,"G"), H = v(s,"H");
+      return `【症狀群C】責任承擔偏低、評估/判斷偏低：${show("G", G, "G3")}，${show("H", H, "H3")}。`;
+    },
+    when: (s) => loLight(v(s,"G")) && loLight(v(s,"H")),
   },
 
-  // 其他常見（示意）：E 高 + G 低 → 衝動行事、紀律不足
+  // ===== 症狀群 D（以 I 欣賞、J 滿意、E 活躍等成就/滿足面）=====
   {
-    id: "X-EG",
-    group: "C",
-    title: "衝動＋紀律不足",
-    severity: 60,
-    when: {
-      all: [
-        { L: "E", inBlocks: [HI_HEAVY, HI_LIGHT] },
-        { L: "G", inBlocks: [LOW] },
-      ],
+    code: "I3+J3",
+    text: (s) => {
+      const I = v(s,"I"), J = v(s,"J");
+      return `【症狀群D】內在成就感不足、外在滿意偏低：${show("I", I, "I3")}，${show("J", J, "J3")}。`;
     },
-    text:
-      "E 偏高 + G 偏低：行動衝動、紀律與承擔不足，容易『先做再想』，後續收拾負擔大（示意，請對照教材條目調整）。",
+    when: (s) => loLight(v(s,"I")) && loLight(v(s,"J")),
+  },
+  {
+    code: "E5+I3",
+    text: (s) => {
+      const E = v(s,"E"), I = v(s,"I");
+      return `【症狀群D】活躍驅動強、內在欣賞不足：${show("E", E, "E5")}，${show("I", I, "I3")}。`;
+    },
+    when: (s) => hiHeavy(v(s,"E")) && loLight(v(s,"I")),
   },
 
-  // 其他常見（示意）：C 低 + D 低 → 僵滯迴避
+  // ===== 幾個容易讀的綜合「兩高/兩低」 =====
   {
-    id: "X-CD",
-    group: "C",
-    title: "僵滯迴避",
-    severity: 55,
-    when: {
-      all: [
-        { L: "C", inBlocks: [LOW] },
-        { L: "D", inBlocks: [LOW] },
-      ],
+    code: "A4+E4",
+    text: (s) => {
+      const A = v(s,"A"), E = v(s,"E");
+      return `【關聯】穩定與活躍並高：${show("A", A, "A4")}，${show("E", E, "E4")}；多半表現主動但偏保守。`;
     },
-    text:
-      "C、D 同時偏低：面對變動與問題容易僵住或迴避，延宕決定與行動（示意，請對照教材條目調整）。",
+    when: (s) => hiLight(v(s,"A")) && hiLight(v(s,"E")),
   },
-
-  // 其他常見（示意）：F 低 + J 低 → 悲觀撤退、關係退縮
   {
-    id: "X-FJ",
-    group: "C",
-    title: "悲觀撤退",
-    severity: 50,
-    when: {
-      all: [
-        { L: "F", inBlocks: [LOW] },
-        { L: "J", inBlocks: [LOW] },
-      ],
+    code: "C3+G3",
+    text: (s) => {
+      const C = v(s,"C"), G = v(s,"G");
+      return `【關聯】面對改變與責任皆偏低：${show("C", C, "C3")}，${show("G", G, "G3")}；較需要外部支持與明確結構。`;
     },
-    text:
-      "F、J 偏低：情緒悲觀且社交退縮，互動容易躲開或無力（示意，請對照教材條目調整）。",
+    when: (s) => loLight(v(s,"C")) && loLight(v(s,"G")),
   },
-
-  // 你可以在這裡繼續把症狀群 A、B、C、D 的所有條目補齊……
 ];
 
-// ====== 引擎：計算命中的規則 ======
-// opts.max 返回的最大條數（避免爆訊息）
+// 主函式：回傳文字陣列
 function applyOcaRules(scores, opts = {}) {
-  const max = opts.max ?? 6;
-
-  const B = {};
-  for (const [k, v] of Object.entries(scores)) B[k] = toBlock(v);
-
-  const hits = [];
-  for (const rule of OCA_RULES) {
-    const ok = isMatch(rule.when, scores, B);
-    if (ok) hits.push(rule);
+  const max = Number(opts.max) > 0 ? Number(opts.max) : 6;
+  const out = [];
+  for (const r of RULES) {
+    try {
+      if (r.when(scores)) {
+        out.push(r.text(scores));
+        if (out.length >= max) break;
+      }
+    } catch (e) {
+      // 單條規則錯誤不影響整體
+      console.error("[_oca_rules] rule error:", r.code, e);
+    }
   }
-
-  // 依 severity（重要性）排序，取前 max
-  hits.sort((a, b) => (b.severity || 0) - (a.severity || 0));
-  return hits.slice(0, max).map(r => `（症狀群 ${r.group}）${r.title}：${r.text}`);
+  return out;
 }
 
-function isMatch(when, raw, blocks) {
-  if (!when) return false;
-  if (when.all) {
-    return when.all.every(cond => check(cond, raw, blocks));
-  }
-  if (when.any) {
-    return when.any.some(cond => check(cond, raw, blocks));
-  }
-  return false;
-}
-
-function check(cond, raw, blocks) {
-  const v = raw[cond.L];
-  const b = blocks[cond.L];
-
-  if (cond.inBlocks) {
-    return cond.inBlocks.includes(b);
-  }
-  if (typeof cond.gte === "number" && !(v >= cond.gte)) return false;
-  if (typeof cond.lte === "number" && !(v <= cond.lte)) return false;
-  return true;
-}
-
-// 輸出給 submit-oca.js 使用
-module.exports = {
-  BLOCKS,
-  toBlock,
-  OCA_RULES,
-  applyOcaRules,
-};
+module.exports = { applyOcaRules };
