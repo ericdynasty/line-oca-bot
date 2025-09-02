@@ -1,194 +1,232 @@
 // api/submit-oca.js
-// v2.1: 單點改「空一行」分隔 + 教材句庫 + fetch polyfill
+// 教材版：分區門檻 & A1~J4 句庫（口語化精簡），含躁狂與少量「症狀群」示意規則
 
-// ---- fetch polyfill (for Node 16/older) ----
-const fetchFn = (...args) =>
-  (typeof fetch === 'function'
-    ? fetch(...args)
-    : import('node-fetch').then(m => m.default(...args)));
-
-// ---- 基本常數 ----
 const LETTERS = "ABCDEFGHIJ".split("");
+
+// 你目前用的點名（依你最新截圖）
 const NAMES = {
-  A: "A 穩定",
-  B: "B 價值",
-  C: "C 變化",
-  D: "D 果敢",
-  E: "E 活躍",
-  F: "F 樂觀",
-  G: "G 責任",
-  H: "H 評估力",
-  I: "I 欣賞能力",
-  J: "J 滿意能力",
+  A: "穩定",
+  B: "價值",
+  C: "變化",
+  D: "果敢",
+  E: "活躍",
+  F: "樂觀",
+  G: "責任",
+  H: "評估力",
+  I: "欣賞能力",
+  J: "滿意能力",
 };
 
-// ❶ 教材句庫（請把教材的 A1~J5 句子貼到對應 key：vlow/low/mid/high/vhigh）
-const PHRASE_BOOK = {
+// —— 教材分區門檻（四區） ——
+// 1: +70~+100, 2: +20~+69, 3: -39~+19, 4: -100~-40
+function scoreToBlock(n) {
+  if (n >= 70) return 1;
+  if (n >= 20) return 2;
+  if (n >= -39) return 3;
+  return 4;
+}
+
+const BLOCK_TAG = {1: "高(重)", 2: "高(輕)", 3: "中性", 4: "低(輕/重)"};
+
+// —— 教材句庫（口語化精簡）——
+// 說明保持教材重點，不照抄長句，以易讀短句呈現；括號標示(A1..J4)便於對照教材卡。
+const TEXT = {
   A: {
-    vlow: "（教材 A1）偏低且影響重，需特別留意。",
-    low : "（教材 A2）略偏低，偶有受影響。",
-    mid : "（教材 A3）中性，較平衡。",
-    high: "（教材 A4）略偏高，傾向較明顯。",
-    vhigh:"（教材 A5）偏高且影響重，驅動力大。"
+    1: "專注穩、判斷好、主見明。(A1)",
+    2: "大致穩，偶被情緒影響。(A2)",
+    3: "注意力易散、決定不穩。(A3)",
+    4: "不穩、難專注，易受情緒牽動。(A4)"
   },
-  B: { vlow:"（教材 B1）", low:"（教材 B2）", mid:"（教材 B3）", high:"（教材 B4）", vhigh:"（教材 B5）" },
-  C: { vlow:"（教材 C1）", low:"（教材 C2）", mid:"（教材 C3）", high:"（教材 C4）", vhigh:"（教材 C5）" },
-  D: { vlow:"（教材 D1）", low:"（教材 D2）", mid:"（教材 D3）", high:"（教材 D4）", vhigh:"（教材 D5）" },
-  E: { vlow:"（教材 E1）", low:"（教材 E2）", mid:"（教材 E3）", high:"（教材 E4）", vhigh:"（教材 E5）" },
-  F: { vlow:"（教材 F1）", low:"（教材 F2）", mid:"（教材 F3）", high:"（教材 F4）", vhigh:"（教材 F5）" },
-  G: { vlow:"（教材 G1）", low:"（教材 G2）", mid:"（教材 G3）", high:"（教材 G4）", vhigh:"（教材 G5）" },
-  H: { vlow:"（教材 H1）", low:"（教材 H2）", mid:"（教材 H3）", high:"（教材 H4）", vhigh:"（教材 H5）" },
-  I: { vlow:"（教材 I1）", low:"（教材 I2）", mid:"（教材 I3）", high:"（教材 I4）", vhigh:"（教材 I5）" },
-  J: { vlow:"（教材 J1）", low:"（教材 J2）", mid:"（教材 J3）", high:"（教材 J4）", vhigh:"（教材 J5）" },
+  B: {
+    1: "樂觀真誠、情緒明亮。(B1)",
+    2: "整體心情偏正向。(B2)",
+    3: "易受影響、心情起伏。(B3)",
+    4: "不滿足、興趣感降低。(B4)"
+  },
+  C: {
+    1: "靈活變通、能切換。(C1)",
+    2: "大致能調整變化。(C2)",
+    3: "適應力一般、偶卡住。(C3)",
+    4: "緊張僵硬、難調整。(C4)"
+  },
+  D: {
+    1: "果斷勇於承擔。(D1)",
+    2: "多能面對、敢處理。(D2)",
+    3: "面對一般、偶猶豫。(D3)",
+    4: "逃避迴避、難面對。(D4)"
+  },
+  E: {
+    1: "行動多且有效率。(E1)",
+    2: "活躍偏高、動能夠。(E2)",
+    3: "動能一般、偶失序。(E3)",
+    4: "活力低、推不動。(E4)"
+  },
+  F: {
+    1: "積極正向、信心穩。(F1)",
+    2: "多半看好、有動力。(F2)",
+    3: "較悲觀、動力易掉。(F3)",
+    4: "負面感強、需提振。(F4)"
+  },
+  G: {
+    1: "主動承擔、領導感。(G1)",
+    2: "大致負責、願意扛。(G2)",
+    3: "責任感一般。(G3)",
+    4: "推責閃避、掌控弱。(G4)"
+  },
+  H: {
+    1: "看事準、能公平衡量。(H1)",
+    2: "多能評估，偶偏見。(H2)",
+    3: "評估不穩、易受情緒。(H3)",
+    4: "偏頗主觀、難客觀。(H4)"
+  },
+  I: {
+    1: "欣賞力強、善肯定。(I1)",
+    2: "多能欣賞、給資源。(I2)",
+    3: "容易挑剔、少肯定。(I3)",
+    4: "批判強、難包容。(I4)"
+  },
+  J: {
+    1: "社交流暢、商務溝通佳。(J1)",
+    2: "可溝通，但偶離群。(J2)",
+    3: "離群感明顯、溝通受阻。(J3)",
+    4: "嚴重離群、社交障礙。(J4)"
+  }
 };
 
-// ---- 小工具 ----
-const num = (v, d = 0) => Number.isFinite(Number(v)) ? Number(v) : d;
-const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
-const safeScore = v => clamp(num(v, 0), -100, 100);
+// 躁狂（教材：僅 B、E 可能標示）
+const MANIA = {
+  B: "（B 躁狂）情緒過度高亢、誇大與失真，笑點偏怪、判斷易失準。",
+  E: "（E 躁狂）動能過強、衝動忙亂，行動超出可負荷與能力範圍。"
+};
 
-function normalizeScores(input) {
-  const out = {};
-  for (const L of LETTERS) out[L] = safeScore(input && input[L]);
+// —— 少量「症狀群」示意規則（可再擴充）——
+function groupHints(scores) {
+  const s = scores;
+  const hi = x => s[x] >= 20;     // 粗略「偏高」判斷（教材強調相對高低，這裡簡化）
+  const lo = x => s[x] <= -11;    // 粗略「偏低」判斷
+
+  const out = [];
+
+  // A、B、C 低 -> 神經過敏/陷在失落（教材：症狀群C）
+  if (lo('A') && lo('B') && lo('C')) {
+    out.push("A、B、C 偏低：容易神經緊繃、陷在過往失落（示意，自教材症狀群C）。");
+  }
+  // A 高、H 低 → 完美主義（教材：症狀群C 範例）
+  if (hi('A') && lo('H')) {
+    out.push("A 高 + H 低：完美主義傾向，標準高、對人事要求嚴（示意）。");
+  }
+  // B 高、D 低 → 有躁狂困擾（教材：症狀群C 範例）
+  if (hi('B') && lo('D')) {
+    out.push("B 高 + D 低：可能有躁狂困擾（會傻笑），行為表現與實際不符（示意）。");
+  }
   return out;
 }
 
-function bandName(n) {
-  const v = num(n, 0);
-  if (v >= 41)  return "高(重)";
-  if (v >= 11)  return "高(輕)";
-  if (v <= -41) return "低(重)";
-  if (v <= -11) return "低(輕)";
-  return "中性";
-}
-function bandKey(n) {
-  const v = num(n, 0);
-  if (v >= 41)  return "vhigh";
-  if (v >= 11)  return "high";
-  if (v <= -41) return "vlow";
-  if (v <= -11) return "low";
-  return "mid";
-}
-function fallbackHint(n) {
-  const v = num(n, 0);
-  if (v >= 41)  return "偏強勢、驅動力大";
-  if (v >= 11)  return "略偏高、傾向較明顯";
-  if (v <= -41) return "不足感明顯、需特別留意";
-  if (v <= -11) return "略偏低、偶爾受影響";
-  return "較平衡、影響小";
-}
-function phraseFromBook(letter, n) {
-  try {
-    const book = PHRASE_BOOK[letter];
-    const key = bandKey(n);
-    const s = book && book[key];
-    if (s && typeof s === "string" && s.trim()) return s.trim();
-  } catch (_) {}
-  return fallbackHint(n);
+// —— 工具函式 —— 
+function normalizeScores(input) {
+  const out = {};
+  for (const L of LETTERS) {
+    const v = Number(input?.[L]);
+    out[L] = Number.isFinite(v) ? Math.max(-100, Math.min(100, v)) : 0;
+  }
+  return out;
 }
 
-// ---- LINE push ----
+function topLetters(scores, k = 3) {
+  return Object.entries(scores)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .slice(0, k);
+}
+
 async function pushMessage(to, messages) {
-  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
-  if (!token) {
-    console.error("[submit-oca] Missing LINE_CHANNEL_ACCESS_TOKEN");
-    return;
-  }
-  const resp = await fetchFn("https://api.line.me/v2/bot/message/push", {
+  const resp = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ to, messages }),
   });
   if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    console.error("[submit-oca] Push API error:", resp.status, t);
+    console.error("Push API error:", resp.status, await resp.text().catch(() => ""));
   }
 }
 
-// ---- handler ----
+// —— 主流程（供 /api/form 與「聊天填表」共同送來）——
 module.exports = async (req, res) => {
   try {
     if (req.method !== "POST") {
       return res.status(405).send("Method Not Allowed");
     }
 
-    let body = req.body;
-    if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch { body = {}; }
-    }
-    body = body || {};
+    const {
+      userId, name, gender, age, date,
+      maniaB, maniaE,                // 讓前端在 B/E 勾選「躁狂」時填 true
+      scores: rawScores,
+      wants                           // {single:true, combo:true, persona:true} 可選
+    } = req.body || {};
 
-    const userId = body.userId || "";
-    const name   = (body.name || "").toString().slice(0, 40);
-    const gender = (body.gender || "").toString().slice(0, 10);
-    const age    = num(body.age, 0);
-    const date   = (body.date || "").toString().slice(0, 20);
+    if (!userId) return res.status(400).json({ ok: false, msg: "缺少 userId" });
+    if (!age || Number(age) < 14) return res.status(400).json({ ok: false, msg: "年齡需 ≥ 14" });
 
-    const maniaB = !!body.maniaB;
-    const maniaE = !!body.maniaE;
-    const scores = normalizeScores(body.scores || {});
-    const wants  = Object.assign({ single:true, combo:true, persona:true }, body.wants || {});
+    const scores = normalizeScores(rawScores);
 
-    if (!userId) {
-      console.error("[submit-oca] Missing userId");
-      return res.status(200).json({ ok:false, msg:"missing userId" });
-    }
-    if (age < 14) {
-      await pushMessage(userId, [{ type:"text", text:"年齡需 ≥ 14 才能進行分析，請再確認年齡喔。" }]);
-      return res.status(200).json({ ok:false, msg:"age < 14" });
+    // —— 單點輸出（每點中間空一行，易讀）——
+    const singleLines = [];
+    for (const L of LETTERS) {
+      const val = scores[L];
+      const blk = scoreToBlock(val);
+      const tag = BLOCK_TAG[blk];
+      const txt = TEXT[L][blk] || "";
+      singleLines.push(`${L} ${NAMES[L]}：${val}｜${tag}\n${txt}`);
     }
 
-    const hello = { type:"text", text:`Hi ${name || ""}！已收到你的 OCA 分數。\n（年齡：${age}，性別：${gender || "未填"}）` };
+    // —— 綜合重點：列出影響最大的 3 點 + 躁狂 + 日期 —— 
+    const tops = topLetters(scores, 3);
+    const topText = tops.map(([L, v]) => `${L}${NAMES[L]}：${v}`).join("、");
+    const maniaMsgs = [];
+    if (maniaB) maniaMsgs.push(MANIA.B);
+    if (maniaE) maniaMsgs.push(MANIA.E);
 
-    // ❷ 單點格式：分數 ｜ 等級 ｜ 教材句子，點與點間「空一行」
-    const SEP = " ｜ ";
-    const singleLines = LETTERS.map(L => {
-      const v = scores[L];
-      const lvl = bandName(v);
-      const txt = phraseFromBook(L, v);
-      return `${NAMES[L]}：${v}${SEP}${lvl}${SEP}${txt}`;
-    });
-    const singleMsg = { type:"text", text: ("【A~J 單點】\n" + singleLines.join("\n\n")).slice(0,5000) };
+    const comboHints = groupHints(scores);
+    const combined =
+      `【綜合重點】\n最需要留意／最有影響的面向：${topText || "無特別突出"}` +
+      `${maniaMsgs.length ? `。\n${maniaMsgs.join("；")}` : "。"}` +
+      `${comboHints.length ? `\n關聯觀察：\n- ${comboHints.join("\n- ")}` : ""}` +
+      `\n日期：${date || "未填"}`;
 
-    // 綜合
-    const tops = Object.entries(scores).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,3);
-    const topText = tops.map(([L,v])=>`${NAMES[L]}：${v}（${bandName(v)}）`).join("、");
-    const comboMsg = {
-      type:"text",
-      text:
-        (`【綜合重點】\n最需要留意/最有影響的面向：${topText || "無特別突出"}。\n` +
-         `躁狂（B 情緒）：${maniaB ? "有" : "無"}；躁狂（E 點）：${maniaE ? "有" : "無"}；日期：${date || "未填"}。`).slice(0,5000)
-    };
-
-    // 人物側寫（簡版）
-    let personaText = "【人物側寫】\n";
+    // —— 人物側寫（示意：取前兩名做方向詞）——
+    let persona = "【人物側寫】\n";
     if (tops.length >= 2) {
-      const [L1,v1] = tops[0]; const [L2,v2] = tops[1];
-      const dir1 = v1 >= 0 ? "偏高" : "偏低";
-      const dir2 = v2 >= 0 ? "偏高" : "偏低";
-      personaText += `${NAMES[L1]}${dir1}、${NAMES[L2]}${dir2}；整體呈現「${dir1==="偏高"?"主動":"保守"}、${dir2==="偏高"?"外放":"內斂"}」傾向（示意）。`;
+      const [L1, v1] = tops[0];
+      const [L2, v2] = tops[1];
+      const d1 = v1 >= 20 ? "高" : (v1 <= -11 ? "低" : "中");
+      const d2 = v2 >= 20 ? "高" : (v2 <= -11 ? "低" : "中");
+      persona += `${L1}${NAMES[L1]}偏${d1}、${L2}${NAMES[L2]}偏${d2}；整體呈現「方案/標準與行動風格」上的可見傾向（示意）。`;
     } else {
-      personaText += "整體表現較均衡。";
+      persona += "整體較均衡。";
     }
-    const personaMsg = { type:"text", text: personaText.slice(0,5000) };
 
-    const out = [hello];
-    if (wants.single)  out.push(singleMsg);
-    if (wants.combo)   out.push(comboMsg);
-    if (wants.persona) out.push(personaMsg);
+    // —— 依需求拼裝訊息 —— 
+    const bubbles = [];
+    bubbles.push({ type: "text", text: `Hi ${name || ""}！已收到你的 OCA 分數。\n（年齡：${age}，性別：${gender || "未填"}）` });
 
-    await pushMessage(userId, out);
-    return res.status(200).json({ ok:true });
+    if (!wants || wants.single) {
+      const txt = "【A~J 單點】\n" + singleLines.join("\n\n");
+      bubbles.push({ type: "text", text: txt.slice(0, 5000) });
+    }
+    if (!wants || wants.combo) {
+      bubbles.push({ type: "text", text: combined.slice(0, 5000) });
+    }
+    if (!wants || wants.persona) {
+      bubbles.push({ type: "text", text: persona.slice(0, 5000) });
+    }
 
-  } catch (err) {
-    console.error("[submit-oca] Fatal:", err);
-    try {
-      const b = (req && req.body) ? (typeof req.body === 'string' ? req.body : JSON.stringify(req.body)) : '';
-      console.error("[submit-oca] Body snapshot:", b);
-    } catch(_) {}
-    return res.status(200).json({ ok:false, msg:"server error" });
+    await pushMessage(userId, bubbles);
+    return res.status(200).json({ ok: true });
+
+  } catch (e) {
+    console.error(e);
+    return res.status(500).send("Server Error");
   }
 };
