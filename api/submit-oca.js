@@ -1,5 +1,5 @@
 // api/submit-oca.js
-// v2: 虛線分隔 + 教材句庫(可自行貼入) + fetch polyfill + 全面防呆
+// v2.1: 單點改「空一行」分隔 + 教材句庫 + fetch polyfill
 
 // ---- fetch polyfill (for Node 16/older) ----
 const fetchFn = (...args) =>
@@ -22,10 +22,7 @@ const NAMES = {
   J: "J 滿意能力",
 };
 
-// 你可以把教材的 A1~J4 句子直接貼到下面這個物件：
-// 對應表：A1→vlow，A2→low，A3→mid，A4→high，A5→vhigh（B~J 同理）
-// 下面僅示範少量占位文字，請用教材內容覆蓋。
-// 例：PHRASE_BOOK.A.vlow = "（教材 A1 句子）";
+// ❶ 教材句庫（請把教材的 A1~J5 句子貼到對應 key：vlow/low/mid/high/vhigh）
 const PHRASE_BOOK = {
   A: {
     vlow: "（教材 A1）偏低且影響重，需特別留意。",
@@ -34,13 +31,7 @@ const PHRASE_BOOK = {
     high: "（教材 A4）略偏高，傾向較明顯。",
     vhigh:"（教材 A5）偏高且影響重，驅動力大。"
   },
-  B: {
-    vlow: "（教材 B1）",
-    low : "（教材 B2）",
-    mid : "（教材 B3）",
-    high: "（教材 B4）",
-    vhigh:"（教材 B5）"
-  },
+  B: { vlow:"（教材 B1）", low:"（教材 B2）", mid:"（教材 B3）", high:"（教材 B4）", vhigh:"（教材 B5）" },
   C: { vlow:"（教材 C1）", low:"（教材 C2）", mid:"（教材 C3）", high:"（教材 C4）", vhigh:"（教材 C5）" },
   D: { vlow:"（教材 D1）", low:"（教材 D2）", mid:"（教材 D3）", high:"（教材 D4）", vhigh:"（教材 D5）" },
   E: { vlow:"（教材 E1）", low:"（教材 E2）", mid:"（教材 E3）", high:"（教材 E4）", vhigh:"（教材 E5）" },
@@ -58,13 +49,10 @@ const safeScore = v => clamp(num(v, 0), -100, 100);
 
 function normalizeScores(input) {
   const out = {};
-  for (const L of LETTERS) {
-    out[L] = safeScore(input && input[L]);
-  }
+  for (const L of LETTERS) out[L] = safeScore(input && input[L]);
   return out;
 }
 
-// 等級名稱（供顯示）
 function bandName(n) {
   const v = num(n, 0);
   if (v >= 41)  return "高(重)";
@@ -73,8 +61,6 @@ function bandName(n) {
   if (v <= -11) return "低(輕)";
   return "中性";
 }
-
-// 等級 key（查教材句庫）
 function bandKey(n) {
   const v = num(n, 0);
   if (v >= 41)  return "vhigh";
@@ -83,8 +69,6 @@ function bandKey(n) {
   if (v <= -11) return "low";
   return "mid";
 }
-
-// 若教材未填，退回簡易描述
 function fallbackHint(n) {
   const v = num(n, 0);
   if (v >= 41)  return "偏強勢、驅動力大";
@@ -93,8 +77,6 @@ function fallbackHint(n) {
   if (v <= -11) return "略偏低、偶爾受影響";
   return "較平衡、影響小";
 }
-
-// 取教材句子
 function phraseFromBook(letter, n) {
   try {
     const book = PHRASE_BOOK[letter];
@@ -102,7 +84,6 @@ function phraseFromBook(letter, n) {
     const s = book && book[key];
     if (s && typeof s === "string" && s.trim()) return s.trim();
   } catch (_) {}
-  // 沒填教材 → 使用 fallback
   return fallbackHint(n);
 }
 
@@ -111,7 +92,7 @@ async function pushMessage(to, messages) {
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
   if (!token) {
     console.error("[submit-oca] Missing LINE_CHANNEL_ACCESS_TOKEN");
-    return; // 不 throw
+    return;
   }
   const resp = await fetchFn("https://api.line.me/v2/bot/message/push", {
     method: "POST",
@@ -136,7 +117,7 @@ module.exports = async (req, res) => {
 
     let body = req.body;
     if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch (e) { body = {}; }
+      try { body = JSON.parse(body); } catch { body = {}; }
     }
     body = body || {};
 
@@ -146,74 +127,53 @@ module.exports = async (req, res) => {
     const age    = num(body.age, 0);
     const date   = (body.date || "").toString().slice(0, 20);
 
-    const maniaB = !!body.maniaB; // 躁狂(B)
-    const maniaE = !!body.maniaE; // 躁狂(E)
+    const maniaB = !!body.maniaB;
+    const maniaE = !!body.maniaE;
     const scores = normalizeScores(body.scores || {});
-    const wants = Object.assign(
-      { single: true, combo: true, persona: true },
-      body.wants || {}
-    );
+    const wants  = Object.assign({ single:true, combo:true, persona:true }, body.wants || {});
 
     if (!userId) {
-      console.error("[submit-oca] Missing userId in body");
-      return res.status(200).json({ ok: false, msg: "missing userId" });
+      console.error("[submit-oca] Missing userId");
+      return res.status(200).json({ ok:false, msg:"missing userId" });
     }
     if (age < 14) {
-      await pushMessage(userId, [
-        { type: "text", text: "年齡需 ≥ 14 才能進行分析，請再確認年齡喔。" }
-      ]);
-      return res.status(200).json({ ok: false, msg: "age < 14" });
+      await pushMessage(userId, [{ type:"text", text:"年齡需 ≥ 14 才能進行分析，請再確認年齡喔。" }]);
+      return res.status(200).json({ ok:false, msg:"age < 14" });
     }
 
-    // ---- 訊息組裝 ----
-    const hello = {
-      type: "text",
-      text: `Hi ${name || ""}！已收到你的 OCA 分數。\n（年齡：${age}，性別：${gender || "未填"}）`
-    };
+    const hello = { type:"text", text:`Hi ${name || ""}！已收到你的 OCA 分數。\n（年齡：${age}，性別：${gender || "未填"}）` };
 
-    // 虛線樣式（可自行調整長度/符號）
-    const DASH = " ───── ";
+    // ❷ 單點格式：分數 ｜ 等級 ｜ 教材句子，點與點間「空一行」
+    const SEP = " ｜ ";
+    const singleLines = LETTERS.map(L => {
+      const v = scores[L];
+      const lvl = bandName(v);
+      const txt = phraseFromBook(L, v);
+      return `${NAMES[L]}：${v}${SEP}${lvl}${SEP}${txt}`;
+    });
+    const singleMsg = { type:"text", text: ("【A~J 單點】\n" + singleLines.join("\n\n")).slice(0,5000) };
 
-    // A~J 單點（分數 ───── 等級 ───── 教材句子）
-    const singleText =
-      "【A~J 單點】\n" +
-      LETTERS.map(L => {
-        const v   = scores[L];
-        const lvl = bandName(v);
-        const txt = phraseFromBook(L, v); // << 用教材
-        return `${NAMES[L]}：${v}${DASH}${lvl}${DASH}${txt}`;
-      }).join("\n");
-
-    const singleMsg = { type: "text", text: singleText.slice(0, 5000) };
-
-    // 綜合（維持既有邏輯）
-    const tops = Object.entries(scores)
-      .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-      .slice(0, 3);
-    const topText = tops
-      .map(([L, v]) => `${NAMES[L]}：${v}（${bandName(v)}）`)
-      .join("、");
-
+    // 綜合
+    const tops = Object.entries(scores).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,3);
+    const topText = tops.map(([L,v])=>`${NAMES[L]}：${v}（${bandName(v)}）`).join("、");
     const comboMsg = {
-      type: "text",
+      type:"text",
       text:
-        `【綜合重點】\n最需要留意/最有影響的面向：${topText || "無特別突出"}。\n` +
-        `躁狂（B 情緒）：${maniaB ? "有" : "無"}；躁狂（E 點）：${maniaE ? "有" : "無"}；日期：${date || "未填"}。`
-        .slice(0, 5000)
+        (`【綜合重點】\n最需要留意/最有影響的面向：${topText || "無特別突出"}。\n` +
+         `躁狂（B 情緒）：${maniaB ? "有" : "無"}；躁狂（E 點）：${maniaE ? "有" : "無"}；日期：${date || "未填"}。`).slice(0,5000)
     };
 
-    // 人物側寫（簡版，如果你有教材側寫也可改成句庫）
+    // 人物側寫（簡版）
     let personaText = "【人物側寫】\n";
     if (tops.length >= 2) {
-      const [L1, v1] = tops[0];
-      const [L2, v2] = tops[1];
+      const [L1,v1] = tops[0]; const [L2,v2] = tops[1];
       const dir1 = v1 >= 0 ? "偏高" : "偏低";
       const dir2 = v2 >= 0 ? "偏高" : "偏低";
-      personaText += `${NAMES[L1]}${dir1}、${NAMES[L2]}${dir2}；整體呈現「${dir1 === "偏高" ? "主動" : "保守"}、${dir2 === "偏高" ? "外放" : "內斂"}」傾向（示意）。`;
+      personaText += `${NAMES[L1]}${dir1}、${NAMES[L2]}${dir2}；整體呈現「${dir1==="偏高"?"主動":"保守"}、${dir2==="偏高"?"外放":"內斂"}」傾向（示意）。`;
     } else {
       personaText += "整體表現較均衡。";
     }
-    const personaMsg = { type: "text", text: personaText.slice(0, 5000) };
+    const personaMsg = { type:"text", text: personaText.slice(0,5000) };
 
     const out = [hello];
     if (wants.single)  out.push(singleMsg);
@@ -221,7 +181,7 @@ module.exports = async (req, res) => {
     if (wants.persona) out.push(personaMsg);
 
     await pushMessage(userId, out);
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok:true });
 
   } catch (err) {
     console.error("[submit-oca] Fatal:", err);
@@ -229,6 +189,6 @@ module.exports = async (req, res) => {
       const b = (req && req.body) ? (typeof req.body === 'string' ? req.body : JSON.stringify(req.body)) : '';
       console.error("[submit-oca] Body snapshot:", b);
     } catch(_) {}
-    return res.status(200).json({ ok: false, msg: "server error" });
+    return res.status(200).json({ ok:false, msg:"server error" });
   }
 };
