@@ -1,5 +1,5 @@
 // api/line-webhook.js
-// v3.1: 修正歡迎詞重複，加入 helloSent 旗標；數字選項輸入 & 驗簽
+// v4: 加入 Quick Reply 按鍵；修正歡迎詞僅一次；支援數字選項與常用分數快捷鍵
 
 const crypto = require('crypto');
 
@@ -18,7 +18,7 @@ const LIFF_LINK = LIFF_ID ? `https://liff.line.me/${LIFF_ID}` : null;
 // 簡易 session（冷啟動會清）
 const SESSIONS = new Map(); // userId -> { step, letterIdx, data:{...}, helloSent }
 
-async function replyMessage(replyToken, messages) {
+async function replyRaw(payload) {
   try {
     const resp = await fetchFn('https://api.line.me/v2/bot/message/reply', {
       method: 'POST',
@@ -26,7 +26,7 @@ async function replyMessage(replyToken, messages) {
         'Authorization': `Bearer ${CHANNEL_ACCESS_TOKEN}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ replyToken, messages })
+      body: JSON.stringify(payload)
     });
     if (!resp.ok) {
       const t = await resp.text().catch(() => '');
@@ -36,8 +36,24 @@ async function replyMessage(replyToken, messages) {
     console.error('Reply API failed:', e);
   }
 }
-
+async function replyMessage(replyToken, messages) {
+  return replyRaw({ replyToken, messages });
+}
 const t = (text) => ({ type: 'text', text });
+
+// 產 Quick Reply 文本
+function qText(text, pairs /* [[label,text],...] */) {
+  return {
+    type: 'text',
+    text,
+    quickReply: {
+      items: (pairs || []).map(([label, v]) => ({
+        type: 'action',
+        action: { type: 'message', label, text: v }
+      }))
+    }
+  };
+}
 
 // ---- 驗簽 ----
 function verifySignature(headerSignature, body) {
@@ -51,7 +67,7 @@ function verifySignature(headerSignature, body) {
 // ---- 工具 ----
 const LETTERS = "ABCDEFGHIJ".split("");
 const NAME_OF = {
-  A: "A 自我", B: "B 情緒", C: "C 任務", D: "D 関係", E: "E 支援",
+  A: "A 自我", B: "B 情緒", C: "C 任務", D: "D 關係", E: "E 支援",
   F: "F 壓力", G: "G 目標", H: "H 執行", I: "I 自律", J: "J 活力"
 };
 
@@ -94,12 +110,12 @@ function isYmd(str) {
 // ---- 問句 ----
 const MSG = {
   hello: `您好，我是 Eric 的 OCA 助理，我會逐一詢問您每項資料，請您確實填寫，謝謝。\n請輸入填表人姓名：`,
-  gender: `性別請輸入數字：\n1：男　2：女　3：其他`,
+  gender: `性別請選擇（或輸入 1/2/3）：`,
   age: `請輸入年齡（需 ≥ 14）：`,
-  date: `日期請輸入：\n1：今天　或輸入 YYYY/MM/DD（例如 2025/09/02）`,
-  maniaB: `躁狂（B 情緒）是否有？請輸入數字：\n1：有　2：無`,
-  maniaE: `躁狂（E 點）是否有？請輸入數字：\n1：有　2：無`,
-  wants: `想看的內容（可擇一；若要全部選 4）：\n1：A~J 單點　2：綜合重點　3：人物側寫　4：全部`,
+  date: `請選擇日期（或輸入 YYYY/MM/DD）：`,
+  maniaB: `躁狂（B 情緒）是否有？`,
+  maniaE: `躁狂（E 點）是否有？`,
+  wants: `想看的內容（可擇一；若要全部選 4）：`,
   finishing: `分析處理中，請稍候……`,
 };
 
@@ -114,19 +130,59 @@ function getSession(userId) {
 
 async function askNext(replyToken, s) {
   switch (s.step) {
-    case 0:  return replyMessage(replyToken, [t(MSG.hello)]);
-    case 1:  return replyMessage(replyToken, [t(MSG.gender)]);
-    case 2:  return replyMessage(replyToken, [t(MSG.age)]);
-    case 3:  return replyMessage(replyToken, [t(MSG.date)]);
-    case 4:  return replyMessage(replyToken, [t(MSG.maniaB)]);
-    case 5:  return replyMessage(replyToken, [t(MSG.maniaE)]);
+    case 0:
+      return replyMessage(replyToken, [t(MSG.hello)]);
+    case 1:
+      return replyMessage(replyToken, [
+        qText(MSG.gender, [
+          ['男(1)', '1'],
+          ['女(2)', '2'],
+          ['其他(3)', '3'],
+        ])
+      ]);
+    case 2:
+      return replyMessage(replyToken, [t(MSG.age)]);
+    case 3:
+      return replyMessage(replyToken, [
+        qText(MSG.date, [
+          ['今天(1)', '1'],
+        ])
+      ]);
+    case 4:
+      return replyMessage(replyToken, [
+        qText(MSG.maniaB, [
+          ['有(1)', '1'],
+          ['無(2)', '2'],
+        ])
+      ]);
+    case 5:
+      return replyMessage(replyToken, [
+        qText(MSG.maniaE, [
+          ['有(1)', '1'],
+          ['無(2)', '2'],
+        ])
+      ]);
     case 6: {
       const L = LETTERS[s.letterIdx];
-      return replyMessage(replyToken, [t(`請輸入 ${L} 點（-100～100）的分數：`)]);
+      // 常用分數快捷鍵
+      const fav = [['-50','-50'], ['-25','-25'], ['0','0'], ['25','25'], ['50','50']];
+      return replyMessage(replyToken, [
+        qText(`請輸入 ${L} 點（-100～100）的分數：`, fav)
+      ]);
     }
-    case 7:  return replyMessage(replyToken, [t(MSG.wants)]);
-    case 8:  return replyMessage(replyToken, [t(MSG.finishing)]);
-    default: return replyMessage(replyToken, [t('流程結束。')]);
+    case 7:
+      return replyMessage(replyToken, [
+        qText(MSG.wants, [
+          ['A~J 單點(1)', '1'],
+          ['綜合重點(2)', '2'],
+          ['人物側寫(3)', '3'],
+          ['全部(4)', '4'],
+        ])
+      ]);
+    case 8:
+      return replyMessage(replyToken, [t(MSG.finishing)]);
+    default:
+      return replyMessage(replyToken, [t('流程結束。')]);
   }
 }
 
@@ -135,7 +191,6 @@ async function handleText(ev, text) {
   const userId = ev.source?.userId;
   if (!userId) return;
 
-  // 取消
   if (/^取消$/i.test(text.trim())) {
     SESSIONS.delete(userId);
     return replyMessage(replyToken, [t('已取消，若要重新開始可再次傳訊。')]);
@@ -144,7 +199,6 @@ async function handleText(ev, text) {
   const s = getSession(userId);
 
   if (s.step === 0) {
-    // 這裡直接把輸入視為姓名
     const name = text.trim();
     if (!name) return replyMessage(replyToken, [t('姓名不可空白，請重新輸入姓名：')]);
     s.data.name = name.slice(0, 40);
@@ -158,7 +212,11 @@ async function handleText(ev, text) {
     if (v === '1') gender = '男';
     else if (v === '2') gender = '女';
     else if (v === '3') gender = '其他';
-    if (!gender) return replyMessage(replyToken, [t('請輸入數字 1/2/3：\n1：男　2：女　3：其他')]);
+    if (!gender) {
+      return replyMessage(replyToken, [
+        qText('請點選或輸入 1/2/3：', [['男(1)','1'],['女(2)','2'],['其他(3)','3']])
+      ]);
+    }
     s.data.gender = gender;
     s.step = 2;
     return askNext(replyToken, s);
@@ -181,7 +239,9 @@ async function handleText(ev, text) {
     } else if (isYmd(v)) {
       s.data.date = v.replace(/-/g, '/');
     } else {
-      return replyMessage(replyToken, [t('格式不正確，請輸入 1（今天）或 YYYY/MM/DD：')]);
+      return replyMessage(replyToken, [
+        qText('格式不正確，請點選「今天(1)」或輸入 YYYY/MM/DD：', [['今天(1)','1']])
+      ]);
     }
     s.step = 4;
     return askNext(replyToken, s);
@@ -190,7 +250,9 @@ async function handleText(ev, text) {
   if (s.step === 4) {
     const v = normalizeNumStr(text);
     if (v !== '1' && v !== '2') {
-      return replyMessage(replyToken, [t('請輸入數字 1（有）或 2（無）：')]);
+      return replyMessage(replyToken, [
+        qText('請輸入 1（有）或 2（無）：', [['有(1)','1'],['無(2)','2']])
+      ]);
     }
     s.data.maniaB = (v === '1');
     s.step = 5;
@@ -200,7 +262,9 @@ async function handleText(ev, text) {
   if (s.step === 5) {
     const v = normalizeNumStr(text);
     if (v !== '1' && v !== '2') {
-      return replyMessage(replyToken, [t('請輸入數字 1（有）或 2（無）：')]);
+      return replyMessage(replyToken, [
+        qText('請輸入 1（有）或 2（無）：', [['有(1)','1'],['無(2)','2']])
+      ]);
     }
     s.data.maniaE = (v === '1');
     s.step = 6;
@@ -212,7 +276,9 @@ async function handleText(ev, text) {
     const L = LETTERS[s.letterIdx];
     const sc = parseScore(text);
     if (sc === null) {
-      return replyMessage(replyToken, [t(`分數需為 -100~100 的整數，請重新輸入 ${L} 點分數：`)]);
+      return replyMessage(replyToken, [
+        qText(`分數需為 -100~100 的整數，請重新輸入 ${L} 點分數：`, [['-50','-50'],['-25','-25'],['0','0'],['25','25'],['50','50']])
+      ]);
     }
     s.data.scores[L] = sc;
     s.letterIdx++;
@@ -226,7 +292,14 @@ async function handleText(ev, text) {
   if (s.step === 7) {
     const v = normalizeNumStr(text);
     if (!['1','2','3','4'].includes(v)) {
-      return replyMessage(replyToken, [t('請輸入數字 1~4（若要全部選 4）：\n1：A~J 單點　2：綜合重點　3：人物側寫　4：全部')]);
+      return replyMessage(replyToken, [
+        qText('請輸入 1~4（若要全部選 4）：', [
+          ['A~J 單點(1)', '1'],
+          ['綜合重點(2)', '2'],
+          ['人物側寫(3)', '3'],
+          ['全部(4)', '4'],
+        ])
+      ]);
     }
     const wants = { single:false, combo:false, persona:false };
     if (v === '4') wants.single = wants.combo = wants.persona = true;
@@ -283,17 +356,17 @@ module.exports = async (req, res) => {
       if (/^(填表|聊天填表|開始)$/i.test(text)) {
         SESSIONS.delete(userId);
         const s = getSession(userId);
-        s.helloSent = true;          // 防止立即處理時又再送一次 hello
+        s.helloSent = true;
         await replyMessage(ev.replyToken, [t(MSG.hello)]);
         continue;
       }
 
-      // 第一次收到訊息：先送歡迎詞一次，之後就處理輸入
+      // 第一次訊息：先送歡迎詞
       const s = getSession(userId);
       if (!s.helloSent) {
         s.helloSent = true;
         await replyMessage(ev.replyToken, [t(MSG.hello)]);
-        continue; // 等下一則把名字當作 step 0 輸入
+        continue; // 下一則會當名字
       }
 
       await handleText(ev, text);
