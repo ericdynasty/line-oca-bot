@@ -1,5 +1,4 @@
-// api/submit-oca.js
-// 依教材分區 + 單點句庫 + 躁狂(B/E) + 症狀群；分批推播避免一次超過5則
+// api/submit-oca.js  — 極簡輸出版（最多 3 則）
 const rules = require('./oca_rules.json');
 
 const LETTERS = "ABCDEFGHIJ".split("");
@@ -8,12 +7,18 @@ const NAMES = {
   F: "F 積極",  G: "G 責任",  H: "H 評估",  I: "I 同理",  J: "J 溝通"
 };
 
-// ---- 區塊分法（教材）----
+// 分區（教材）
 function blockOf(n) {
   if (n >= 70) return 1;
   if (n >= 20) return 2;
   if (n >= -39) return 3;
   return 4;
+}
+
+// 只取第一子句，保留原意但精簡
+function firstClause(txt = "") {
+  const m = String(txt).split(/[，。；]/)[0] || "";
+  return m.trim();
 }
 
 function normalizeScores(input) {
@@ -31,88 +36,47 @@ function topByAbs(scores, k = 3) {
     .slice(0, k);
 }
 
-function lineSingle(scores, useManiaB, useManiaE) {
-  const lines = [];
-  for (const L of LETTERS) {
-    const n = scores[L];
-    const blk = blockOf(n);
-    if (L === 'B' && useManiaB && rules.mania.B) {
-      lines.push(`${NAMES[L]}｜${n}｜B* 躁狂 ── ${rules.mania.B}`);
-      continue;
-    }
-    if (L === 'E' && useManiaE && rules.mania.E) {
-      lines.push(`${NAMES[L]}｜${n}｜E* 躁狂 ── ${rules.mania.E}`);
-      continue;
-    }
-    const txt = rules.single[L][String(blk)] || '';
-    lines.push(`${NAMES[L]}｜${n}｜${L}${blk} ── ${txt}`);
-  }
-  return lines;
-}
-
-function lineGroups(scores) {
+// 症狀群（教材精選，最多 3 條）
+function linesGroups(scores) {
   const out = [];
-  // 症狀群 B（常見精選）
-  if (blockOf(scores.A) === 1 && [3,4].includes(blockOf(scores.C))) {
-    out.push("A1×C3/4：外表想穩定，但緊張與注意力分散在作祟（隱性不穩）。");
-  }
-  if (blockOf(scores.B) === 1 && [3,4].includes(blockOf(scores.C))) {
-    out.push("B1×C3/4：緊張降低了實際的愉快感，快樂不穩、容易被擾動。");
-  }
-  if (blockOf(scores.E) === 1 && [3,4].includes(blockOf(scores.F))) {
-    out.push("E1×F3/4：很想做、很忙，但在人群前容易退縮或羞怯，超出能力範圍。");
-  }
-  if (blockOf(scores.F) === 1 && [3,4].includes(blockOf(scores.G))) {
-    out.push("F1×G3/4：能幹但不負責，易把現況歸咎他人，帶來風險與麻煩。");
-  }
-  if (blockOf(scores.H) === 1 && [3,4].includes(blockOf(scores.I))) {
-    out.push("H1×I3/4：表面公平、心裡挑剔；缺乏同理會讓評估失真。");
-  }
+  const b = k => blockOf(scores[k]);
+  // 症狀群 B（常見）
+  if (b('A') === 1 && [3,4].includes(b('C')))
+    out.push("A1×C3/4：外表想穩定但內在緊張。");
+  if (b('B') === 1 && [3,4].includes(b('C')))
+    out.push("B1×C3/4：快樂不穩、易被擾動。");
+  if (b('E') === 1 && [3,4].includes(b('F')))
+    out.push("E1×F3/4：想做很多但在人前退縮。");
+  if (b('F') === 1 && [3,4].includes(b('G')))
+    out.push("F1×G3/4：能幹但不負責，易引風險。");
+  if (b('H') === 1 && [3,4].includes(b('I')))
+    out.push("H1×I3/4：表面公平、心裡挑剔。");
+
   // 症狀群 C（相對模式）
   if ([scores.A,scores.B,scores.C].every(v => [3,4].includes(blockOf(v))) &&
       [scores.A,scores.B,scores.C].some(v => blockOf(v)===4)) {
-    out.push("A/B/C 低：神經過敏、常被過去的失落拉住注意力。");
+    out.push("A/B/C 低：神經過敏、注意力易被拉走。");
   }
-  if (blockOf(scores.A)===4 && [1,2].includes(blockOf(scores.E))) {
-    out.push("A 低＋E 高：活躍但缺乏中心，容易瞎忙。");
-  }
-  if ([1,2].includes(blockOf(scores.B)) && [3,4].includes(blockOf(scores.D))) {
-    out.push("B 高＋D 低：躁狂傾向（快樂外放但確定力不足）。");
-  }
-  if ([1,2].includes(blockOf(scores.I)) && [3,4].includes(blockOf(scores.J))) {
-    out.push("I 高＋J 低：討好型，對外在意見過度敏感。");
-  }
+  if (blockOf(scores.A)===4 && [1,2].includes(blockOf(scores.E)))
+    out.push("A 低＋E 高：活躍但缺中心，易瞎忙。");
+  if ([1,2].includes(blockOf(scores.B)) && [3,4].includes(blockOf(scores.D)))
+    out.push("B 高＋D 低：躁狂傾向，確定力不足。");
+  if ([1,2].includes(blockOf(scores.I)) && [3,4].includes(blockOf(scores.J)))
+    out.push("I 高＋J 低：討好型，對外過度敏感。");
+
   // 症狀群 D（相對高低）
-  if (scores.C === Math.max(...Object.values(scores))) {
-    out.push("C 相對高：易自我克制（多源自嚴格的成長環境）。");
-  }
-  if (scores.E > scores.F) {
-    out.push("E > F：常把自己推進超出舒適與能力的工作。");
-  }
-  if (scores.F > scores.E) {
-    out.push("F > E：手上能力足，但未真正把能量用出來。");
-  }
-  return out;
+  if (scores.C === Math.max(...Object.values(scores)))
+    out.push("C 相對高：自我克制偏多。");
+  if (scores.E > scores.F)
+    out.push("E > F：常把自己推進超出能力的事。");
+  if (scores.F > scores.E)
+    out.push("F > E：能力在手，但未真正用出來。");
+
+  return out.slice(0, 3);  // 最多 3 條，精簡
 }
 
-// ---- 工具：切字 + 分批推播 ----
-function chunkStrings(arr, maxLen = 4800) {
-  const chunks = [];
-  let buf = "";
-  for (const line of arr) {
-    const add = (buf ? "\n" : "") + line;
-    if ((buf + add).length > maxLen) {
-      if (buf) chunks.push(buf);
-      buf = line;
-    } else {
-      buf += add;
-    }
-  }
-  if (buf) chunks.push(buf);
-  return chunks;
-}
-
-async function pushBatch(to, messages) {
+// 推播（僅 1 批，因為我們只送 3 則）
+async function push(to, messages) {
   const resp = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: {
@@ -127,67 +91,80 @@ async function pushBatch(to, messages) {
   }
 }
 
-async function pushInBatches(to, allMsgs, size = 5) {
-  for (let i = 0; i < allMsgs.length; i += size) {
-    const slice = allMsgs.slice(i, i + size);
-    await pushBatch(to, slice);
+// 單點列表（每行內用直線分隔；每行之間細分隔線）
+function buildSingleBlock(scores, maniaB, maniaE) {
+  const rows = [];
+  for (const L of LETTERS) {
+    const n = scores[L];
+    const blk = blockOf(n);
+    if (L === 'B' && maniaB && rules?.mania?.B) {
+      rows.push(`${NAMES[L]}｜${n}｜B* ─ ${firstClause(rules.mania.B)}`);
+    } else if (L === 'E' && maniaE && rules?.mania?.E) {
+      rows.push(`${NAMES[L]}｜${n}｜E* ─ ${firstClause(rules.mania.E)}`);
+    } else {
+      const txt = rules?.single?.[L]?.[String(blk)] || "";
+      rows.push(`${NAMES[L]}｜${n}｜${L}${blk} ─ ${firstClause(txt)}`);
+    }
   }
+  return "【A~J 單點】\n" + rows.map(s => `――――――――――――――――\n${s}`).join("\n");
 }
 
-// ---- 主處理 ----
 module.exports = async (req, res) => {
   try {
     if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+    if (!process.env.LINE_CHANNEL_ACCESS_TOKEN)
+      return res.status(500).json({ ok:false, msg:"缺少 LINE_CHANNEL_ACCESS_TOKEN" });
 
-    const { userId, name, gender, age, date, scores: raw,
-            maniaB = false, maniaE = false } = req.body || {};
-    if (!userId) return res.status(400).json({ ok: false, msg: "缺少 userId" });
-    if (!age || Number(age) < 14) return res.status(400).json({ ok: false, msg: "年齡需 ≥ 14" });
+    const {
+      userId, name, gender, age, date,
+      scores: raw,
+      maniaB = false, maniaE = false
+    } = req.body || {};
+
+    if (!userId || !/^U[0-9a-f]{32}$/i.test(userId))
+      return res.status(400).json({ ok:false, msg:"userId 不正確" });
+    if (!age || Number(age) < 14)
+      return res.status(400).json({ ok:false, msg:"年齡需 ≥ 14" });
 
     const scores = normalizeScores(raw);
 
-    // 單點
-    const singleLines = lineSingle(scores, !!maniaB, !!maniaE);
-    const singleText = [
-      "【A~J 單點】",
-      ...singleLines.map(s => "─".repeat(36) + "\n" + s)
-    ];
+    // (1) 標頭
+    const header = {
+      type: "text",
+      text: `Hi ${name || ""}！已收到你的 OCA 分數。\n（年齡：${age}，性別：${gender || "未填"}）`
+    };
 
-    // 症狀群
-    const groupLines = lineGroups(scores);
-    const groupText = groupLines.length ? ["【症狀群（符合者）】", ...groupLines] : [];
+    // (2) A~J 單點（精簡第一子句 + 直線分隔）
+    const singleText = buildSingleBlock(scores, !!maniaB, !!maniaE);
+    const singleMsg = { type: "text", text: singleText.slice(0, 4900) };
 
-    // 綜合重點
+    // (3) 綜合重點 + 人物側寫（都精簡）
     const tops = topByAbs(scores, 3)
-      .map(([L, v]) => `${NAMES[L]}：${v}（${L}${blockOf(v)}）`);
-    const combo = [
-      "【綜合重點】",
-      `最有影響的面向：${tops.join("、")}。`,
-      `躁狂（B）：${maniaB ? "有" : "無"}；躁狂（E）：${maniaE ? "有" : "無"}；日期：${date || "未填"}。`
-    ];
+      .map(([L, v]) => `${NAMES[L]}：${v}（${L}${blockOf(v)}）`)
+      .join("、");
 
-    // 人物側寫（簡版）
+    const groups = linesGroups(scores).join("／") || "（無）";
+
     const t2 = topByAbs(scores, 2);
-    const [L1, v1] = t2[0] || [];
-    const [L2, v2] = t2[1] || [];
-    const dir = (n)=> (n>=0 ? "偏高" : "偏低");
-    const persona = [
-      "【人物側寫】",
-      (L1 ? `${NAMES[L1]}${dir(v1)}、${NAMES[L2]}${dir(v2)}；整體呈現「${dir(v1)==="偏高"?"主動":"保守"}、${dir(v2)==="偏高"?"外放":"內斂"}」傾向（示意）。` : "整體較均衡。")
-    ];
+    const dir = n => (n >= 0 ? "偏高" : "偏低");
+    const persona =
+      t2.length >= 2
+        ? `${NAMES[t2[0][0]]}${dir(t2[0][1])}、${NAMES[t2[1][0]]}${dir(t2[1][1])}；整體「${dir(t2[0][1])==="偏高"?"主動":"保守"}・${dir(t2[1][1])==="偏高"?"外放":"內斂"}」傾向。`
+        : `整體較均衡。`;
 
-    // 組裝訊息與分段
-    const texts = [
-      `Hi ${name || ""}！已收到你的 OCA 分數。\n（年齡：${age}，性別：${gender || "未填"}）`,
-      ...chunkStrings(singleText),
-      ...chunkStrings(groupText),
-      ...chunkStrings(combo),
-      ...chunkStrings(persona),
-    ].map(text => ({ type: "text", text }));
+    const comboMsg = {
+      type: "text",
+      text:
+        `【綜合重點】\n重點面向：${tops || "無特別突出"}。\n` +
+        `症狀群：${groups}\n` +
+        `躁狂（B）：${maniaB ? "有" : "無"}；躁狂（E）：${maniaE ? "有" : "無"}；日期：${date || "未填"}。\n\n` +
+        `【人物側寫】\n${persona}`
+    };
 
-    // 分批推播（每批<=5）
-    await pushInBatches(userId, texts, 5);
+    // 最多 3 則
+    await push(userId, [header, singleMsg, comboMsg]);
 
+    // 回應表單/聊天端
     return res.status(200).json({ ok: true });
   } catch (e) {
     console.error(e);
