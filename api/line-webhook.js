@@ -1,9 +1,9 @@
 // api/line-webhook.js
-// v3.0: 數字選項輸入（性別/日期/躁狂/想看內容）+ 自動歡迎詞 + 驗簽
+// v3.1: 修正歡迎詞重複，加入 helloSent 旗標；數字選項輸入 & 驗簽
 
 const crypto = require('crypto');
 
-// ---- fetch polyfill (for Node 16/older) ----
+// ---- fetch polyfill ----
 const fetchFn = (...args) =>
   (typeof fetch === 'function'
     ? fetch(...args)
@@ -12,13 +12,12 @@ const fetchFn = (...args) =>
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || '';
 const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
 
-const LIFF_ID = process.env.LIFF_ID || ''; // 若還想保留 LIFF 按鈕
+const LIFF_ID = process.env.LIFF_ID || '';
 const LIFF_LINK = LIFF_ID ? `https://liff.line.me/${LIFF_ID}` : null;
 
-// 簡易「記憶」對話狀態（冷啟動會重置）
-const SESSIONS = new Map(); // key: userId -> {step, data, letterIdx}
+// 簡易 session（冷啟動會清）
+const SESSIONS = new Map(); // userId -> { step, letterIdx, data:{...}, helloSent }
 
-// ---- LINE Reply ----
 async function replyMessage(replyToken, messages) {
   try {
     const resp = await fetchFn('https://api.line.me/v2/bot/message/reply', {
@@ -30,7 +29,7 @@ async function replyMessage(replyToken, messages) {
       body: JSON.stringify({ replyToken, messages })
     });
     if (!resp.ok) {
-      const t = await resp.text().catch(()=> '');
+      const t = await resp.text().catch(() => '');
       console.error('Reply API error:', resp.status, t);
     }
   } catch (e) {
@@ -52,13 +51,12 @@ function verifySignature(headerSignature, body) {
 // ---- 工具 ----
 const LETTERS = "ABCDEFGHIJ".split("");
 const NAME_OF = {
-  A: "A 自我", B: "B 情緒", C: "C 任務", D: "D 關係", E: "E 支援",
+  A: "A 自我", B: "B 情緒", C: "C 任務", D: "D 関係", E: "E 支援",
   F: "F 壓力", G: "G 目標", H: "H 執行", I: "I 自律", J: "J 活力"
 };
 
 function normalizeNumStr(s) {
   if (!s) return '';
-  // 全形數字轉半形
   const full = '０１２３４５６７８９－—';
   const half = '0123456789--';
   let out = '';
@@ -68,32 +66,24 @@ function normalizeNumStr(s) {
   }
   return out.trim();
 }
-
 function parseIntLoose(s) {
   const v = Number(normalizeNumStr(s));
   return Number.isFinite(v) ? Math.floor(v) : NaN;
 }
-
 function parseScore(s) {
   const v = Number(normalizeNumStr(s));
   if (!Number.isFinite(v)) return null;
   if (v < -100 || v > 100) return null;
   return Math.round(v);
 }
-
-function pad(n) { return String(n).padStart(2,'0'); }
-
 function todayYMD() {
   const dt = new Date();
-  // 以台灣時區取今天
-  const fY = new Intl.DateTimeFormat('zh-TW',{ timeZone:'Asia/Taipei', year:'numeric' }).format(dt);
-  const fM = new Intl.DateTimeFormat('zh-TW',{ timeZone:'Asia/Taipei', month:'2-digit' }).format(dt);
-  const fD = new Intl.DateTimeFormat('zh-TW',{ timeZone:'Asia/Taipei', day:'2-digit' }).format(dt);
-  return `${fY}/${fM}/${fD}`;
+  const y = new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', year: 'numeric' }).format(dt);
+  const m = new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', month: '2-digit' }).format(dt);
+  const d = new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', day: '2-digit' }).format(dt);
+  return `${y}/${m}/${d}`;
 }
-
 function isYmd(str) {
-  // YYYY/MM/DD 簡驗
   const m = /^(\d{4})[\/\-](\d{2})[\/\-](\d{2})$/.exec(str);
   if (!m) return false;
   const y = +m[1], mo = +m[2], d = +m[3];
@@ -101,7 +91,7 @@ function isYmd(str) {
   return true;
 }
 
-// ---- 問句與流程 ----
+// ---- 問句 ----
 const MSG = {
   hello: `您好，我是 Eric 的 OCA 助理，我會逐一詢問您每項資料，請您確實填寫，謝謝。\n請輸入填表人姓名：`,
   gender: `性別請輸入數字：\n1：男　2：女　3：其他`,
@@ -113,17 +103,15 @@ const MSG = {
   finishing: `分析處理中，請稍候……`,
 };
 
-// 建立/取得 session
 function getSession(userId) {
   let s = SESSIONS.get(userId);
   if (!s) {
-    s = { step: 0, letterIdx: 0, data: { scores: {} } };
+    s = { step: 0, letterIdx: 0, data: { scores: {} }, helloSent: false };
     SESSIONS.set(userId, s);
   }
   return s;
 }
 
-// 送出下一個問題
 async function askNext(replyToken, s) {
   switch (s.step) {
     case 0:  return replyMessage(replyToken, [t(MSG.hello)]);
@@ -142,7 +130,6 @@ async function askNext(replyToken, s) {
   }
 }
 
-// 解析使用者輸入
 async function handleText(ev, text) {
   const replyToken = ev.replyToken;
   const userId = ev.source?.userId;
@@ -157,16 +144,15 @@ async function handleText(ev, text) {
   const s = getSession(userId);
 
   if (s.step === 0) {
-    // 姓名
+    // 這裡直接把輸入視為姓名
     const name = text.trim();
     if (!name) return replyMessage(replyToken, [t('姓名不可空白，請重新輸入姓名：')]);
-    s.data.name = name.slice(0,40);
+    s.data.name = name.slice(0, 40);
     s.step = 1;
     return askNext(replyToken, s);
   }
 
   if (s.step === 1) {
-    // 性別：1=男 2=女 3=其他
     const v = normalizeNumStr(text);
     let gender = '';
     if (v === '1') gender = '男';
@@ -179,7 +165,6 @@ async function handleText(ev, text) {
   }
 
   if (s.step === 2) {
-    // 年齡
     const age = parseIntLoose(text);
     if (!Number.isFinite(age) || age < 14 || age > 120) {
       return replyMessage(replyToken, [t('年齡需為 14~120 的整數，請重新輸入：')]);
@@ -190,12 +175,11 @@ async function handleText(ev, text) {
   }
 
   if (s.step === 3) {
-    // 日期
     const v = normalizeNumStr(text);
     if (v === '1') {
       s.data.date = todayYMD();
     } else if (isYmd(v)) {
-      s.data.date = v.replace(/-/g,'/'); // 正規化
+      s.data.date = v.replace(/-/g, '/');
     } else {
       return replyMessage(replyToken, [t('格式不正確，請輸入 1（今天）或 YYYY/MM/DD：')]);
     }
@@ -204,7 +188,6 @@ async function handleText(ev, text) {
   }
 
   if (s.step === 4) {
-    // 躁狂B 1=有 2=無
     const v = normalizeNumStr(text);
     if (v !== '1' && v !== '2') {
       return replyMessage(replyToken, [t('請輸入數字 1（有）或 2（無）：')]);
@@ -215,7 +198,6 @@ async function handleText(ev, text) {
   }
 
   if (s.step === 5) {
-    // 躁狂E 1=有 2=無
     const v = normalizeNumStr(text);
     if (v !== '1' && v !== '2') {
       return replyMessage(replyToken, [t('請輸入數字 1（有）或 2（無）：')]);
@@ -227,7 +209,6 @@ async function handleText(ev, text) {
   }
 
   if (s.step === 6) {
-    // A~J 分數
     const L = LETTERS[s.letterIdx];
     const sc = parseScore(text);
     if (sc === null) {
@@ -238,13 +219,11 @@ async function handleText(ev, text) {
     if (s.letterIdx < LETTERS.length) {
       return askNext(replyToken, s);
     }
-    // 分數輸入完
     s.step = 7;
     return askNext(replyToken, s);
   }
 
   if (s.step === 7) {
-    // 想看的內容 1/2/3/4
     const v = normalizeNumStr(text);
     if (!['1','2','3','4'].includes(v)) {
       return replyMessage(replyToken, [t('請輸入數字 1~4（若要全部選 4）：\n1：A~J 單點　2：綜合重點　3：人物側寫　4：全部')]);
@@ -256,18 +235,15 @@ async function handleText(ev, text) {
     else if (v === '3') wants.persona = true;
     s.data.wants = wants;
 
-    // 送交分析
     s.step = 8;
     await askNext(replyToken, s);
 
     try {
-      const resp = await fetchFn(`${process.env.PUBLIC_BASE_URL || 'https://'+process.env.VERCEL_URL}/api/submit-oca`, {
+      const base = process.env.PUBLIC_BASE_URL || ('https://' + process.env.VERCEL_URL);
+      const resp = await fetchFn(`${base}/api/submit-oca`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId,
-          ...s.data
-        })
+        body: JSON.stringify({ userId, ...s.data })
       });
       if (!resp.ok) {
         const msg = await resp.text().catch(()=> '');
@@ -278,13 +254,11 @@ async function handleText(ev, text) {
       console.error('submit-oca fetch failed:', e);
       await replyMessage(replyToken, [t('分析送出失敗，請稍後再試或改用「填表」。')]);
     } finally {
-      // 完成後清掉 session
       SESSIONS.delete(userId);
     }
     return;
   }
 
-  // 預設
   return replyMessage(replyToken, [t('請依指示輸入；若要取消請輸入「取消」。')]);
 }
 
@@ -299,35 +273,32 @@ module.exports = async (req, res) => {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const events = body.events || [];
     for (const ev of events) {
-      if (ev.type === 'message' && ev.message?.type === 'text') {
-        const text = (ev.message.text || '').trim();
+      if (ev.type !== 'message' || ev.message?.type !== 'text') continue;
 
-        // 若使用者說「填表」或「聊天填表」，強制重新開始
-        if (/^(填表|聊天填表)$/i.test(text)) {
-          const userId = ev.source?.userId;
-          if (userId) SESSIONS.delete(userId);
-          await replyMessage(ev.replyToken, [t('已開始新的填表流程。')]);
-          const s = getSession(userId);
-          s.step = 0;
-          await askNext(ev.replyToken, s);
-          continue;
-        }
+      const text = (ev.message.text || '').trim();
+      const userId = ev.source?.userId;
+      if (!userId) continue;
 
-        // 自動帶入歡迎＆流程（若沒有 session 就建立）
-        const userId = ev.source?.userId;
+      // 關鍵字重置流程
+      if (/^(填表|聊天填表|開始)$/i.test(text)) {
+        SESSIONS.delete(userId);
         const s = getSession(userId);
-        if (s.step === 0 && !/^取消$/.test(text)) {
-          // 若第一次就不是姓名也沒關係，直接當姓名
-          // 但仍先送出 hello 再要姓名
-          await askNext(ev.replyToken, s); // hello
-          continue;
-        }
-
-        await handleText(ev, text);
+        s.helloSent = true;          // 防止立即處理時又再送一次 hello
+        await replyMessage(ev.replyToken, [t(MSG.hello)]);
         continue;
       }
-      // 非文字訊息忽略
+
+      // 第一次收到訊息：先送歡迎詞一次，之後就處理輸入
+      const s = getSession(userId);
+      if (!s.helloSent) {
+        s.helloSent = true;
+        await replyMessage(ev.replyToken, [t(MSG.hello)]);
+        continue; // 等下一則把名字當作 step 0 輸入
+      }
+
+      await handleText(ev, text);
     }
+
     return res.status(200).json({ ok: true });
   } catch (e) {
     console.error(e);
