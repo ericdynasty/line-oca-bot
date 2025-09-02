@@ -334,7 +334,6 @@ async function handleText(ev, text) {
 
   return replyMessage(replyToken, [t('請依指示輸入；若要取消請輸入「取消」。')]);
 }
-
 module.exports = async (req, res) => {
   try {
     if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
@@ -345,6 +344,7 @@ module.exports = async (req, res) => {
 
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const events = body.events || [];
+
     for (const ev of events) {
       if (ev.type !== 'message' || ev.message?.type !== 'text') continue;
 
@@ -352,22 +352,45 @@ module.exports = async (req, res) => {
       const userId = ev.source?.userId;
       if (!userId) continue;
 
-      // 關鍵字重置流程
+      // 顯式觸發：重置並開始
       if (/^(填表|聊天填表|開始)$/i.test(text)) {
         SESSIONS.delete(userId);
-        const s = getSession(userId);
-        s.helloSent = true;
-        await replyMessage(ev.replyToken, [t(MSG.hello)]);
+        const s0 = getSession(userId);
+        s0.helloSent = true;   // 避免緊接著又判斷一次
+        await replyMessage(ev.replyToken, [{ type: 'text', text: MSG.hello }]);
         continue;
       }
 
-      // 第一次訊息：先送歡迎詞
       const s = getSession(userId);
+
+      // ---- 這裡是「不重覆歡迎詞」的關鍵 ----
       if (!s.helloSent) {
+        // 這些字視為問候，不當姓名
+        const GREET = /^(你好|哈囉|嗨|hi|hello)$/i;
+        // 可能是日期或純數字（像 1/2/3）
+        const norm = normalizeNumStr(text);
+        const looksLikeDate = isYmd(norm);
+        const looksLikePureNumber = /^\d{1,3}$/.test(norm);
+
+        // 「像姓名」的條件：不是指令、不是問候、不是日期、不是純數字；長度合理
+        const looksLikeName =
+          !GREET.test(text) &&
+          !/^(填表|聊天填表|開始|取消)$/i.test(text) &&
+          !looksLikeDate &&
+          !looksLikePureNumber &&
+          text.length > 0 && text.length <= 40;
+
         s.helloSent = true;
-        await replyMessage(ev.replyToken, [t(MSG.hello)]);
-        continue; // 下一則會當名字
+        if (looksLikeName) {
+          // 直接把這則訊息當「姓名」，不再送第二次歡迎詞
+          await handleText(ev, text);
+        } else {
+          // 才送一次歡迎詞
+          await replyMessage(ev.replyToken, [{ type: 'text', text: MSG.hello }]);
+        }
+        continue;
       }
+      // --------------------------------------
 
       await handleText(ev, text);
     }
@@ -378,3 +401,4 @@ module.exports = async (req, res) => {
     return res.status(500).send('Server Error');
   }
 };
+
