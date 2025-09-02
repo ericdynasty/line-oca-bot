@@ -2,16 +2,16 @@
 // 不讀外部 JSON；內建極簡規則 + 推播回覆（含躁狂 B/E）
 const LETTERS = "ABCDEFGHIJ".split("");
 const NAMES = {
-  A: "A 自我",
-  B: "B 情緒",
-  C: "C 任務",
-  D: "D 關係",
-  E: "E 支援",
-  F: "F 壓力",
-  G: "G 目標",
-  H: "H 執行",
-  I: "I 自律",
-  J: "J 活力",
+  A: "A 穩定",
+  B: "B 愉快",
+  C: "C 鎮定",
+  D: "D 確定力",
+  E: "E 活躍",
+  F: "F 積極",
+  G: "G 責任",
+  H: "H 評估能力",
+  I: "I 欣賞能力",
+  J: "J 溝通能力",
 };
 
 function normalizeScores(input) {
