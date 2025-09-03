@@ -1,26 +1,13 @@
 // api/rules-test.js
-// 確認 /api 路由與讀檔沒問題的最小測試
+// 測試規則檔是否能被讀到（對外路徑 /api/rules-test）
 
-const fs = require('fs');
-const path = require('path');
+const { loadRulesSafe } = require('./_oca_rules');
 
-module.exports = (req, res) => {
-  try {
-    const file = path.join(process.cwd(), 'data', 'oca_rules.json');
-    const raw = fs.readFileSync(file, 'utf8');
-    const json = JSON.parse(raw);
-
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.status(200).json({
-      ok: true,
-      countKeys: Object.keys(json || {}).length,
-      previewKeys: Object.keys(json || {}).slice(0, 5),
-      source: 'file:' + file
-    });
-  } catch (e) {
-    res.status(500).json({
-      ok: false,
-      err: String(e)
-    });
-  }
+module.exports = async (req, res) => {
+  const ret = loadRulesSafe();
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(200).json(ret);
 };
+
+// 強制使用 Node.js runtime（因為我們要用 fs）
+module.exports.config = { runtime: 'nodejs20.x' };
