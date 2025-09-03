@@ -1,125 +1,206 @@
 // api/_oca_rules.js
-// 規則與句庫（JS 版）。你也可以改用 /data/oca_rules.json（submit-oca.js 會優先讀 JSON）。
+// OCA 規則引擎：先嘗試讀 data/oca_rules.json；讀不到就用內建 fallback。
+// 也提供格式化輸出的工具（單點、綜合重點、人物側寫）。
+
+const fs = require('fs');
+const path = require('path');
+
+const LETTERS = 'ABCDEFGHIJ'.split('');
+const NAMES = {
+  A: '穩定',
+  B: '價值',
+  C: '變化',
+  D: '果敢',
+  E: '活躍',
+  F: '樂觀',
+  G: '責任',
+  H: '評估力',
+  I: '欣賞能力',
+  J: '滿意能力',
+};
+
+// 內建「非常簡化」的 fallback（避免讀不到 JSON 時什麼都沒有）。
+// 你要的教材用詞，請放在 data/oca_rules.json，這份只會在讀檔失敗時使用。
+const FALLBACK = {
+  _meta: {
+    source: 'fallback',
+    schema: 'v1',
+    note: '未讀到 data/oca_rules.json，先用示意規則',
+  },
+  bands: {
+    // 每個 band 給一個「方向、標籤、簡述」。教材請放到 JSON。
+    // 這裡只有示意文字，實際請以教材填入 data 檔。
+    A: [
+      { code: 'A5', min: 41, label: '高(重)', desc: '偏高且影響重、驅動力大。' },
+      { code: 'A4', min: 11, max: 40, label: '高(輕)', desc: '略偏高、傾向較明顯。' },
+      { code: 'A3', min: -10, max: 10, label: '中性', desc: '較平衡、影響小。' },
+      { code: 'A2', min: -40, max: -11, label: '低(輕)', desc: '略偏低、偶爾受影響。' },
+      { code: 'A1', max: -41, label: '低(重)', desc: '不足感明顯、需特別留意。' },
+    ],
+    B: [
+      { code: 'B5', min: 41, label: '高(重)', desc: '偏高且影響重。' },
+      { code: 'B4', min: 11, max: 40, label: '高(輕)', desc: '略偏高。' },
+      { code: 'B3', min: -10, max: 10, label: '中性', desc: '較平衡。' },
+      { code: 'B2', min: -40, max: -11, label: '低(輕)', desc: '略偏低。' },
+      { code: 'B1', max: -41, label: '低(重)', desc: '不足明顯。' },
+    ],
+    C: [
+      { code: 'C5', min: 41, label: '高(重)', desc: '偏高且影響重。' },
+      { code: 'C4', min: 11, max: 40, label: '高(輕)', desc: '略偏高。' },
+      { code: 'C3', min: -10, max: 10, label: '中性', desc: '較平衡。' },
+      { code: 'C2', min: -40, max: -11, label: '低(輕)', desc: '略偏低。' },
+      { code: 'C1', max: -41, label: '低(重)', desc: '不足明顯、需留意。' },
+    ],
+    D: [
+      { code: 'D5', min: 41, label: '高(重)', desc: '偏高且影響重、傾向明顯。' },
+      { code: 'D4', min: 11, max: 40, label: '高(輕)', desc: '略偏高、傾向較明顯。' },
+      { code: 'D3', min: -10, max: 10, label: '中性', desc: '較平衡、影響小。' },
+      { code: 'D2', min: -40, max: -11, label: '低(輕)', desc: '略偏低、偶爾受影響。' },
+      { code: 'D1', max: -41, label: '低(重)', desc: '不足明顯、需留意。' },
+    ],
+    E: [
+      { code: 'E5', min: 41, label: '高(重)', desc: '偏高且影響重、驅動力大。' },
+      { code: 'E4', min: 11, max: 40, label: '高(輕)', desc: '略偏高。' },
+      { code: 'E3', min: -10, max: 10, label: '中性', desc: '較平衡。' },
+      { code: 'E2', min: -40, max: -11, label: '低(輕)', desc: '略偏低。' },
+      { code: 'E1', max: -41, label: '低(重)', desc: '不足明顯、需留意。' },
+    ],
+    F: [
+      { code: 'F5', min: 41, label: '高(重)', desc: '偏高且影響重、驅動力大。' },
+      { code: 'F4', min: 11, max: 40, label: '高(輕)', desc: '略偏高。' },
+      { code: 'F3', min: -10, max: 10, label: '中性', desc: '較平衡。' },
+      { code: 'F2', min: -40, max: -11, label: '低(輕)', desc: '略偏低。' },
+      { code: 'F1', max: -41, label: '低(重)', desc: '不足明顯、需留意。' },
+    ],
+    G: [
+      { code: 'G5', min: 41, label: '高(重)', desc: '偏高且影響重。' },
+      { code: 'G4', min: 11, max: 40, label: '高(輕)', desc: '略偏高。' },
+      { code: 'G3', min: -10, max: 10, label: '中性', desc: '較平衡。' },
+      { code: 'G2', min: -40, max: -11, label: '低(輕)', desc: '略偏低。' },
+      { code: 'G1', max: -41, label: '低(重)', desc: '不足明顯、需留意。' },
+    ],
+    H: [
+      { code: 'H5', min: 41, label: '高(重)', desc: '偏高且影響重。' },
+      { code: 'H4', min: 11, max: 40, label: '高(輕)', desc: '略偏高。' },
+      { code: 'H3', min: -10, max: 10, label: '中性', desc: '較平衡。' },
+      { code: 'H2', min: -40, max: -11, label: '低(輕)', desc: '略偏低。' },
+      { code: 'H1', max: -41, label: '低(重)', desc: '不足明顯、需留意。' },
+    ],
+    I: [
+      { code: 'I5', min: 41, label: '高(重)', desc: '偏高且影響重。' },
+      { code: 'I4', min: 11, max: 40, label: '高(輕)', desc: '略偏高。' },
+      { code: 'I3', min: -10, max: 10, label: '中性', desc: '較平衡。' },
+      { code: 'I2', min: -40, max: -11, label: '低(輕)', desc: '不足略明顯、需留意。' },
+      { code: 'I1', max: -41, label: '低(重)', desc: '不足明顯、需特別留意。' },
+    ],
+    J: [
+      { code: 'J5', min: 41, label: '高(重)', desc: '偏高且影響重。' },
+      { code: 'J4', min: 11, max: 40, label: '高(輕)', desc: '略偏高。' },
+      { code: 'J3', min: -10, max: 10, label: '中性', desc: '較平衡。' },
+      { code: 'J2', min: -40, max: -11, label: '低(輕)', desc: '略偏低。' },
+      { code: 'J1', max: -41, label: '低(重)', desc: '不足明顯、需留意。' },
+    ],
+  },
+};
+
+// 嘗試讀 data/oca_rules.json
+function loadRules() {
+  const tryPaths = [
+    // Vercel lambda 內的打包路徑
+    path.join('/var/task', 'data', 'oca_rules.json'),
+    // 本機開發
+    path.join(process.cwd(), 'data', 'oca_rules.json'),
+  ];
+
+  for (const p of tryPaths) {
+    try {
+      const txt = fs.readFileSync(p, 'utf8');
+      const json = JSON.parse(txt);
+      json._meta = json._meta || {};
+      json._meta.source = `file:${p}`;
+      return json;
+    } catch (e) {
+      // 讀不到就試下一個
+    }
+  }
+  return FALLBACK;
+}
+
+// 依分數找 band（教材的 A1~A5 / B1~B5 …）
+function pickBand(letter, score, rules) {
+  const bands = rules.bands?.[letter];
+  if (!bands || !bands.length) {
+    return { code: `${letter}3`, label: '中性', desc: '' };
+  }
+  // 按照 min/max 比對
+  for (const b of bands) {
+    const hasMin = typeof b.min === 'number';
+    const hasMax = typeof b.max === 'number';
+    if (hasMin && hasMax) {
+      if (score >= b.min && score <= b.max) return b;
+    } else if (hasMin && !hasMax) {
+      if (score >= b.min) return b;
+    } else if (!hasMin && hasMax) {
+      if (score <= b.max) return b;
+    }
+  }
+  // 萬一都沒命中，回中性
+  return bands.find(b => /中性/.test(b.label)) || { code: `${letter}3`, label: '中性', desc: '' };
+}
+
+// 產單點：每一點「一段文字」＋**中間空一行**
+function formatSingles(scores, rules, options = {}) {
+  const lines = [];
+  LETTERS.forEach((L) => {
+    const n = Number(scores[L] ?? 0);
+    const band = pickBand(L, n, rules);
+    // A 穩定：44｜高(重)｜（教材 A5） 說明……
+    const one =
+      `${L} ${NAMES[L]}：${n}｜${band.label}｜（教材 ${band.code}）\n` +
+      `— ${band.desc}`;
+    lines.push(one);
+  });
+  // 每點之間空一行
+  return lines.join('\n\n');
+}
+
+// 取絕對值前 3 名，做綜合重點（簡版）
+function formatCombined(scores, rules, extra = {}) {
+  const arr = LETTERS.map(L => [L, Number(scores[L] ?? 0)]);
+  arr.sort((a,b) => Math.abs(b[1]) - Math.abs(a[1]) );
+  const top3 = arr.slice(0,3).map(([L,v]) => `${L} ${NAMES[L]}：${v}（${pickBand(L, v, rules).label}）`);
+  const maniaB = extra.maniaB ? '有' : '無';
+  const maniaE = extra.maniaE ? '有' : '無';
+  const date = extra.date || '';
+  return (
+    `【綜合重點】\n` +
+    `最需要留意／最有影響的面向：${top3.join('、')}。\n` +
+    `躁狂（B 情緒）：${maniaB}；躁狂（E 點）：${maniaE}；\n` +
+    `日 期：${date || '未填'}。`
+  );
+}
+
+// 人物側寫（簡版示例）
+function formatPersona(scores, rules) {
+  const arr = LETTERS.map(L => [L, Number(scores[L] ?? 0)]);
+  arr.sort((a,b) => Math.abs(b[1]) - Math.abs(a[1]) );
+  if (arr.length < 2) return '【人物側寫】\n整體表現較均衡。';
+  const [L1, v1] = arr[0];
+  const [L2, v2] = arr[1];
+  const dir1 = v1 >= 0 ? '偏高' : '偏低';
+  const dir2 = v2 >= 0 ? '偏高' : '偏低';
+  return (
+    `【人物側寫】\n` +
+    `${L1} ${NAMES[L1]}${dir1}、${L2} ${NAMES[L2]}${dir2}；整體呈現「${dir1 === '偏高' ? '主動' : '保守'}、${dir2 === '偏高' ? '外放' : '內斂'}」傾向（示意）。`
+  );
+}
 
 module.exports = {
-  // 等級與臨界值（由高到低）
-  bands: [
-    { id: 'high_heavy', min: 41, label: '高(重)' },
-    { id: 'high_light', min: 11, label: '高(輕)' },
-    { id: 'neutral',    min: -10, label: '中性'  },
-    { id: 'low_light',  min: -40, label: '低(輕)' },
-    { id: 'low_heavy',  min: -100,label: '低(重)' }
-  ],
-
-  // A~J 名稱與對應等級的文字（請把教材句庫貼進 text）
-  letters: {
-    A: {
-      name: '穩定',
-      text: {
-        high_heavy: '（教材 A5）偏高且影響重，驅動力大。',
-        high_light: '（教材 A3）略偏高，較能維持狀態。',
-        neutral:    '（教材 A1）中性，較平衡。',
-        low_light:  '（教材 A2）略偏低，偶爾受影響。',
-        low_heavy:  '（教材 A4）不足感明顯，需特別留意。'
-      }
-    },
-    B: {
-      name: '價值',
-      text: {
-        high_heavy: '（教材 B5）價值感強烈，行動動機明確。',
-        high_light: '（教材 B3）略偏高，偏向堅持自我。',
-        neutral:    '（教材 B1）中性，較平衡。',
-        low_light:  '（教材 B2）略偏低，偶有動搖。',
-        low_heavy:  '（教材 B4）對自我價值的懷疑較多。'
-      }
-    },
-    C: {
-      name: '變化',
-      text: {
-        high_heavy: '（教材 C5）喜歡改變與挑戰。',
-        high_light: '（教材 C3）略偏高，較能接受改變。',
-        neutral:    '（教材 C1）中性，較平衡。',
-        low_light:  '（教材 C2）略偏低，偏向維持現狀。',
-        low_heavy:  '（教材 C4）對變動有明顯排斥。'
-      }
-    },
-    D: {
-      name: '果敢',
-      text: {
-        high_heavy: '（教材 D5）主動果決、行動力強。',
-        high_light: '（教材 D3）略偏高，偏向積極表達。',
-        neutral:    '（教材 D1）中性，較平衡。',
-        low_light:  '（教材 D2）略偏低，表達與行動較保守。',
-        low_heavy:  '（教材 D4）不易做決斷，需更多支持。'
-      }
-    },
-    E: {
-      name: '活躍',
-      text: {
-        high_heavy: '（教材 E5）活力強、外向展現明顯。',
-        high_light: '（教材 E3）略偏高，偏向外放互動。',
-        neutral:    '（教材 E1）中性，較平衡。',
-        low_light:  '（教材 E2）略偏低，社交傾向較少。',
-        low_heavy:  '（教材 E4）明顯沉靜，需留意活力不足。'
-      }
-    },
-    F: {
-      name: '樂觀',
-      text: {
-        high_heavy: '（教材 F5）積極正向，信心高。',
-        high_light: '（教材 F3）略偏高，較能看到機會。',
-        neutral:    '（教材 F1）中性，較平衡。',
-        low_light:  '（教材 F2）略偏低，偶有負向解讀。',
-        low_heavy:  '（教材 F4）悲觀看法較多，需留意。'
-      }
-    },
-    G: {
-      name: '責任',
-      text: {
-        high_heavy: '（教材 G5）責任感強，遵循規範。',
-        high_light: '（教材 G3）略偏高，偏向守秩序。',
-        neutral:    '（教材 G1）中性，較平衡。',
-        low_light:  '（教材 G2）略偏低，彈性較大。',
-        low_heavy:  '（教材 G4）對規範抗拒明顯。'
-      }
-    },
-    H: {
-      name: '評估力',
-      text: {
-        high_heavy: '（教材 H5）分析評估清楚，決策有效。',
-        high_light: '（教材 H3）略偏高，偏向理性衡量。',
-        neutral:    '（教材 H1）中性，較平衡。',
-        low_light:  '（教材 H2）略偏低，判斷偶受情緒影響。',
-        low_heavy:  '（教材 H4）評估與判斷較為困難。'
-      }
-    },
-    I: {
-      name: '欣賞能力',
-      text: {
-        high_heavy: '（教材 I5）欣賞他人與自我，動能大。',
-        high_light: '（教材 I3）略偏高，偏向肯定正向。',
-        neutral:    '（教材 I1）中性，較平衡。',
-        low_light:  '（教材 I2）略偏低，肯定感較少。',
-        low_heavy:  '（教材 I4）不易欣賞自我或他人。'
-      }
-    },
-    J: {
-      name: '滿意能力',
-      text: {
-        high_heavy: '（教材 J5）滿意度高，容易正向累積。',
-        high_light: '（教材 J3）略偏高，較能感受滿足。',
-        neutral:    '（教材 J1）中性，較平衡。',
-        low_light:  '（教材 J2）略偏低，滿足感較少。',
-        low_heavy:  '（教材 J4）容易不滿，需另尋資源。'
-      }
-    }
-  },
-
-  // （可選）若要做更口語化的人物側寫，可以在這裡放模板
-  persona: {
-    templates: [
-      // 之後你可依教材寫出更完整、多種分支的模板
-      '整體呈現：{L1Name}{dir1}、{L2Name}{dir2}；傾向「{tone1}、{tone2}」（示意）。'
-    ]
-  }
+  LETTERS,
+  NAMES,
+  loadRules,
+  pickBand,
+  formatSingles,
+  formatCombined,
+  formatPersona,
 };
