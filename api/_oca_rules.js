@@ -1,148 +1,125 @@
 // api/_oca_rules.js
-// 將 A~J 分數套用教材規則，回傳「症狀群 A～D」的條列敘述。
-// 用法：const { applyOcaRules } = require("./_oca_rules"); ruleHits = applyOcaRules(scores, {max: 6});
+// 規則與句庫（JS 版）。你也可以改用 /data/oca_rules.json（submit-oca.js 會優先讀 JSON）。
 
-const LETTERS = "ABCDEFGHIJ".split("");
+module.exports = {
+  // 等級與臨界值（由高到低）
+  bands: [
+    { id: 'high_heavy', min: 41, label: '高(重)' },
+    { id: 'high_light', min: 11, label: '高(輕)' },
+    { id: 'neutral',    min: -10, label: '中性'  },
+    { id: 'low_light',  min: -40, label: '低(輕)' },
+    { id: 'low_heavy',  min: -100,label: '低(重)' }
+  ],
 
-// 統一取得分數
-function v(scores, L) {
-  const n = Number(scores?.[L]);
-  return Number.isFinite(n) ? n : 0;
-}
-
-// 分段（供顯示與條件判斷參考）
-function band(n) {
-  if (n >= 41) return "高(重)";
-  if (n >= 11) return "高(輕)";
-  if (n <= -41) return "低(重)";
-  if (n <= -11) return "低(輕)";
-  return "中性";
-}
-
-// 閾值判斷小工具
-const hiHeavy = (n) => n >= 41;
-const hiLight = (n) => n >= 11 && n <= 40;
-const loHeavy = (n) => n <= -41;
-const loLight = (n) => n <= -11 && n >= -40;
-
-// 工具：把一個可讀的「點位+分段」字串做出來（用在說明文字內）
-function show(L, n, hintCode) {
-  return `${L}：${n}（${band(n)}｜教材 ${hintCode}）`;
-}
-
-// === 規則本體 ===
-// 說明：
-// - text 盡量教材式、可讀性高
-// - code 保留教材代碼，方便之後你對照教材調整
-// - when(scores) 回傳 true 代表命中
-const RULES = [
-  // ===== 症狀群 A（以 A、C、D 等穩定/變動/果敢相關組合為主）=====
-  {
-    code: "A5+C3",
-    text: (s) => {
-      const A = v(s, "A"), C = v(s, "C");
-      return `【症狀群A】內在僵固、抗拒變動：${show("A", A, "A5")}，${show("C", C, "C3")}。`;
-    },
-    when: (s) => hiHeavy(v(s,"A")) && loHeavy(v(s,"C")),
-  },
-  {
-    code: "A4+D4",
-    text: (s) => {
-      const A = v(s,"A"), D = v(s,"D");
-      return `【症狀群A】穩定度偏高、行動偏保守：${show("A", A, "A4")}，${show("D", D, "D4")}。`;
-    },
-    when: (s) => hiLight(v(s,"A")) && loLight(v(s,"D")),
-  },
-
-  // ===== 症狀群 B（以 B 情緒、F 樂觀、J 滿意等情緒/感受面）=====
-  {
-    code: "B4+J3",
-    text: (s) => {
-      const B = v(s,"B"), J = v(s,"J");
-      return `【症狀群B】情緒波動略高、滿意度偏低：${show("B", B, "B4")}，${show("J", J, "J3")}。`;
-    },
-    when: (s) => hiLight(v(s,"B")) && loLight(v(s,"J")),
-  },
-  {
-    code: "B5+F3",
-    text: (s) => {
-      const B = v(s,"B"), F = v(s,"F");
-      return `【症狀群B】情緒高張、正向期待不足：${show("B", B, "B5")}，${show("F", F, "F3")}。`;
-    },
-    when: (s) => hiHeavy(v(s,"B")) && loLight(v(s,"F")),
-  },
-
-  // ===== 症狀群 C（以 C 變化、E 活躍、G 責任、H 評估力之間的關係）=====
-  {
-    code: "C4+E4",
-    text: (s) => {
-      const C = v(s,"C"), E = v(s,"E");
-      return `【症狀群C】適應力略低、外顯活躍較高：${show("C", C, "C4")}，${show("E", E, "E4")}。`;
-    },
-    when: (s) => loLight(v(s,"C")) && hiLight(v(s,"E")),
-  },
-  {
-    code: "G3+H3",
-    text: (s) => {
-      const G = v(s,"G"), H = v(s,"H");
-      return `【症狀群C】責任承擔偏低、評估/判斷偏低：${show("G", G, "G3")}，${show("H", H, "H3")}。`;
-    },
-    when: (s) => loLight(v(s,"G")) && loLight(v(s,"H")),
-  },
-
-  // ===== 症狀群 D（以 I 欣賞、J 滿意、E 活躍等成就/滿足面）=====
-  {
-    code: "I3+J3",
-    text: (s) => {
-      const I = v(s,"I"), J = v(s,"J");
-      return `【症狀群D】內在成就感不足、外在滿意偏低：${show("I", I, "I3")}，${show("J", J, "J3")}。`;
-    },
-    when: (s) => loLight(v(s,"I")) && loLight(v(s,"J")),
-  },
-  {
-    code: "E5+I3",
-    text: (s) => {
-      const E = v(s,"E"), I = v(s,"I");
-      return `【症狀群D】活躍驅動強、內在欣賞不足：${show("E", E, "E5")}，${show("I", I, "I3")}。`;
-    },
-    when: (s) => hiHeavy(v(s,"E")) && loLight(v(s,"I")),
-  },
-
-  // ===== 幾個容易讀的綜合「兩高/兩低」 =====
-  {
-    code: "A4+E4",
-    text: (s) => {
-      const A = v(s,"A"), E = v(s,"E");
-      return `【關聯】穩定與活躍並高：${show("A", A, "A4")}，${show("E", E, "E4")}；多半表現主動但偏保守。`;
-    },
-    when: (s) => hiLight(v(s,"A")) && hiLight(v(s,"E")),
-  },
-  {
-    code: "C3+G3",
-    text: (s) => {
-      const C = v(s,"C"), G = v(s,"G");
-      return `【關聯】面對改變與責任皆偏低：${show("C", C, "C3")}，${show("G", G, "G3")}；較需要外部支持與明確結構。`;
-    },
-    when: (s) => loLight(v(s,"C")) && loLight(v(s,"G")),
-  },
-];
-
-// 主函式：回傳文字陣列
-function applyOcaRules(scores, opts = {}) {
-  const max = Number(opts.max) > 0 ? Number(opts.max) : 6;
-  const out = [];
-  for (const r of RULES) {
-    try {
-      if (r.when(scores)) {
-        out.push(r.text(scores));
-        if (out.length >= max) break;
+  // A~J 名稱與對應等級的文字（請把教材句庫貼進 text）
+  letters: {
+    A: {
+      name: '穩定',
+      text: {
+        high_heavy: '（教材 A5）偏高且影響重，驅動力大。',
+        high_light: '（教材 A3）略偏高，較能維持狀態。',
+        neutral:    '（教材 A1）中性，較平衡。',
+        low_light:  '（教材 A2）略偏低，偶爾受影響。',
+        low_heavy:  '（教材 A4）不足感明顯，需特別留意。'
       }
-    } catch (e) {
-      // 單條規則錯誤不影響整體
-      console.error("[_oca_rules] rule error:", r.code, e);
+    },
+    B: {
+      name: '價值',
+      text: {
+        high_heavy: '（教材 B5）價值感強烈，行動動機明確。',
+        high_light: '（教材 B3）略偏高，偏向堅持自我。',
+        neutral:    '（教材 B1）中性，較平衡。',
+        low_light:  '（教材 B2）略偏低，偶有動搖。',
+        low_heavy:  '（教材 B4）對自我價值的懷疑較多。'
+      }
+    },
+    C: {
+      name: '變化',
+      text: {
+        high_heavy: '（教材 C5）喜歡改變與挑戰。',
+        high_light: '（教材 C3）略偏高，較能接受改變。',
+        neutral:    '（教材 C1）中性，較平衡。',
+        low_light:  '（教材 C2）略偏低，偏向維持現狀。',
+        low_heavy:  '（教材 C4）對變動有明顯排斥。'
+      }
+    },
+    D: {
+      name: '果敢',
+      text: {
+        high_heavy: '（教材 D5）主動果決、行動力強。',
+        high_light: '（教材 D3）略偏高，偏向積極表達。',
+        neutral:    '（教材 D1）中性，較平衡。',
+        low_light:  '（教材 D2）略偏低，表達與行動較保守。',
+        low_heavy:  '（教材 D4）不易做決斷，需更多支持。'
+      }
+    },
+    E: {
+      name: '活躍',
+      text: {
+        high_heavy: '（教材 E5）活力強、外向展現明顯。',
+        high_light: '（教材 E3）略偏高，偏向外放互動。',
+        neutral:    '（教材 E1）中性，較平衡。',
+        low_light:  '（教材 E2）略偏低，社交傾向較少。',
+        low_heavy:  '（教材 E4）明顯沉靜，需留意活力不足。'
+      }
+    },
+    F: {
+      name: '樂觀',
+      text: {
+        high_heavy: '（教材 F5）積極正向，信心高。',
+        high_light: '（教材 F3）略偏高，較能看到機會。',
+        neutral:    '（教材 F1）中性，較平衡。',
+        low_light:  '（教材 F2）略偏低，偶有負向解讀。',
+        low_heavy:  '（教材 F4）悲觀看法較多，需留意。'
+      }
+    },
+    G: {
+      name: '責任',
+      text: {
+        high_heavy: '（教材 G5）責任感強，遵循規範。',
+        high_light: '（教材 G3）略偏高，偏向守秩序。',
+        neutral:    '（教材 G1）中性，較平衡。',
+        low_light:  '（教材 G2）略偏低，彈性較大。',
+        low_heavy:  '（教材 G4）對規範抗拒明顯。'
+      }
+    },
+    H: {
+      name: '評估力',
+      text: {
+        high_heavy: '（教材 H5）分析評估清楚，決策有效。',
+        high_light: '（教材 H3）略偏高，偏向理性衡量。',
+        neutral:    '（教材 H1）中性，較平衡。',
+        low_light:  '（教材 H2）略偏低，判斷偶受情緒影響。',
+        low_heavy:  '（教材 H4）評估與判斷較為困難。'
+      }
+    },
+    I: {
+      name: '欣賞能力',
+      text: {
+        high_heavy: '（教材 I5）欣賞他人與自我，動能大。',
+        high_light: '（教材 I3）略偏高，偏向肯定正向。',
+        neutral:    '（教材 I1）中性，較平衡。',
+        low_light:  '（教材 I2）略偏低，肯定感較少。',
+        low_heavy:  '（教材 I4）不易欣賞自我或他人。'
+      }
+    },
+    J: {
+      name: '滿意能力',
+      text: {
+        high_heavy: '（教材 J5）滿意度高，容易正向累積。',
+        high_light: '（教材 J3）略偏高，較能感受滿足。',
+        neutral:    '（教材 J1）中性，較平衡。',
+        low_light:  '（教材 J2）略偏低，滿足感較少。',
+        low_heavy:  '（教材 J4）容易不滿，需另尋資源。'
+      }
     }
-  }
-  return out;
-}
+  },
 
-module.exports = { applyOcaRules };
+  // （可選）若要做更口語化的人物側寫，可以在這裡放模板
+  persona: {
+    templates: [
+      // 之後你可依教材寫出更完整、多種分支的模板
+      '整體呈現：{L1Name}{dir1}、{L2Name}{dir2}；傾向「{tone1}、{tone2}」（示意）。'
+    ]
+  }
+};
