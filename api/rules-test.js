@@ -1,33 +1,32 @@
 // api/rules-test.js
-// 簡單測試端點：讀取 data/oca_rules.json 是否成功
+// 讀 data/oca_rules.json 的健康檢查；使用你目前的 loadRulesSafe
 
-const { loadRules } = require('./_oca_rules');
+const { loadRulesSafe } = require('./_oca_rules');
 
 module.exports = async (req, res) => {
-  try {
-    const rules = await loadRules();
-    // 統計一下每個章節有幾條規則，當成健康檢查
-    const sectionNames = Object.keys(rules || {});
-    const perSection = {};
-    let total = 0;
+  const out = loadRulesSafe(); // 同步讀檔（你目前的寫法）
 
-    for (const k of sectionNames) {
-      const arr = Array.isArray(rules[k]) ? rules[k] : [];
-      perSection[k] = arr.length;
-      total += arr.length;
-    }
-
-    res.status(200).json({
-      ok: true,
-      sections: sectionNames,
-      counts: perSection,
-      total,
-    });
-  } catch (e) {
-    res.status(500).json({
-      ok: false,
-      error: e.message,
-      stack: e.stack,
-    });
+  if (!out.ok) {
+    return res.status(500).json(out); // 把錯誤也回給你看
   }
+
+  const rules = out.rules || {};
+  const sections = Object.keys(rules);
+  const counts = {};
+  let total = 0;
+
+  for (const k of sections) {
+    const arr = Array.isArray(rules[k]) ? rules[k] : [];
+    counts[k] = arr.length;
+    total += arr.length;
+  }
+
+  return res.status(200).json({
+    ok: true,
+    from: out.meta && out.meta.source,
+    size: out.meta && out.meta.size,
+    sections,
+    counts,
+    total
+  });
 };
