@@ -1,208 +1,236 @@
 // api/submit-oca.js
-// 將分數與基本資料送進來，推播完整分析給使用者。
-// 依教材：單點 A~J（可讀性排版）＋「症狀群 A~D」關聯解讀（由 _oca_rules.js 規則引擎產出）＋人物側寫。
-// 需要環境變數：LINE_CHANNEL_ACCESS_TOKEN
+// 產生 OCA 分析並推播給使用者（支援：/data/oca_rules.json 優先，否則退回 api/_oca_rules.js）
+// 備註：本檔只負責「把前端/聊天上送的資料 -> 規則 -> 文字」與推播，其他 webhook/表單/聊天流程不用改。
 
-// ---------- 文字標籤（依你目前使用的中文欄位） ----------
-const LETTERS = "ABCDEFGHIJ".split("");
-const NAMES = {
-  A: "A 穩定",
-  B: "B 價值",
-  C: "C 變化",
-  D: "D 果敢",
-  E: "E 活躍",
-  F: "F 樂觀",
-  G: "G 責任",
-  H: "H 評估力",
-  I: "I 欣賞能力",
-  J: "J 滿意能力",
+const fs = require('fs/promises');
+const path = require('path');
+
+// ========= LINE push utility =========
+async function pushMessage(to, messages) {
+  const resp = await fetch('https://api.line.me/v2/bot/message/push', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ to, messages }),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    console.error('Push API error:', resp.status, t);
+  }
+}
+
+// ========= rules loader =========
+async function loadOcaRules() {
+  // 1) 優先讀 /data/oca_rules.json
+  try {
+    const p = path.join(process.cwd(), 'data', 'oca_rules.json');
+    const txt = await fs.readFile(p, 'utf8');
+    return JSON.parse(txt);
+  } catch (_) {
+    // 2) 讀不到就退回你現有的 api/_oca_rules.js
+    try {
+      return require('./_oca_rules.js');
+    } catch (e2) {
+      console.error('OCA rules not found in JSON nor JS:', e2);
+      return null;
+    }
+  }
+}
+
+// ========= 分析核心 =========
+const LETTERS = 'ABCDEFGHIJ'.split('');
+const NAMES_FALLBACK = {
+  A: '穩定',
+  B: '價值',
+  C: '變化',
+  D: '果敢',
+  E: '活躍',
+  F: '樂觀',
+  G: '責任',
+  H: '評估力',
+  I: '欣賞能力',
+  J: '滿意能力',
 };
 
-// ---------- 規則引擎（症狀群 A~D） ----------
-const { applyOcaRules } = require("./_oca_rules");
-
-// ---------- Node18 在 Vercel 已有 fetch，如在本地舊環境需 polyfill ----------
-const fetchFn =
-  typeof fetch === "function"
-    ? fetch
-    : (...args) => import("node-fetch").then((m) => m.default(...args));
-
-// ---------- 工具 ----------
-function normalizeScores(input) {
+function normalizeScores(raw) {
   const out = {};
   for (const L of LETTERS) {
-    const raw = input?.[L];
-    const v = Number(raw);
+    const v = Number(raw?.[L]);
     out[L] = Number.isFinite(v) ? v : 0;
   }
   return out;
 }
 
-// 回傳「帶方向的等級」與極簡提示（單點顯示用：與教材語意一致但口語化精簡）
-function bandDesc(n) {
-  if (n >= 41) return ["高(重)", "偏強勢、驅動大"];
-  if (n >= 11) return ["高(輕)", "略偏高、傾向明顯"];
-  if (n <= -41) return ["低(重)", "不足明顯、需留意"];
-  if (n <= -11) return ["低(輕)", "略偏低、偶爾受影響"];
-  return ["中性", "較平衡、影響小"];
+function bandFromScore(bands, n) {
+  // bands 需含 { id, min, label }，例如：
+  // [{id:'high_heavy',min:41,label:'高(重)'}, {id:'high_light',min:11,label:'高(輕)'}, {id:'neutral',min:-10,label:'中性'}, {id:'low_light',min:-40,label:'低(輕)'}, {id:'low_heavy',min:-100,label:'低(重)'}]
+  // 注意順序：由高到低，min 是該級距的下限（含）
+  for (const b of bands) {
+    if (n >= b.min) return b; // 第一個符合下限者
+  }
+  // 萬一寫反，最後回傳最後一個
+  return bands[bands.length - 1];
 }
 
-// 取絕對值最大的 K 點（用在「綜合重點」）
-function topLetters(scores, k = 3) {
-  return Object.entries(scores)
+function chunkByLimit(text, limit = 4800) {
+  const parts = [];
+  let buf = '';
+  for (const line of text.split('\n')) {
+    if (buf.length + line.length + 1 > limit) {
+      parts.push(buf);
+      buf = line;
+    } else {
+      buf += (buf ? '\n' : '') + line;
+    }
+  }
+  if (buf) parts.push(buf);
+  return parts;
+}
+
+/**
+ * 依規則產出分析
+ * @param {object} RULES 由 JSON 或 JS 載入的規則：
+ * {
+ *   bands:[{id,min,label},...],
+ *   letters:{
+ *     A:{ name:"穩定", text:{ high_heavy:"...", high_light:"...", neutral:"...", low_light:"...", low_heavy:"..." } },
+ *     ...
+ *   },
+ *   persona:{ templates:["C{dir1}、E{dir2}..."] } // 可選
+ * }
+ * @param {object} payload 由前端/聊天送入：{ userId, name, gender, age, date, maniaB, maniaE, scores, wants }
+ * @returns {Array<{type:"text",text:string}>}
+ */
+function analyzeOCA(RULES, payload) {
+  const bands = RULES?.bands || [
+    { id: 'high_heavy', min: 41, label: '高(重)' },
+    { id: 'high_light', min: 11, label: '高(輕)' },
+    { id: 'neutral', min: -10, label: '中性' },
+    { id: 'low_light', min: -40, label: '低(輕)' },
+    { id: 'low_heavy', min: -100, label: '低(重)' },
+  ];
+
+  const letters = RULES?.letters || {};
+  const scores = normalizeScores(payload.scores);
+  const wants = payload.wants || { single: true, combo: true, persona: true };
+
+  const name = payload.name || '';
+  const gender = payload.gender || '未填';
+  const age = Number(payload.age) || 0;
+  const date = payload.date || '';
+  const maniaB = !!payload.maniaB; // 躁狂（B情緒）
+  const maniaE = !!payload.maniaE; // 躁狂（E點）
+
+  // === 單點 ===
+  // 每點：A 穩定：44｜高(重) —— <教材 A5 的一句話>
+  const singleLines = [];
+  for (const L of LETTERS) {
+    const conf = letters[L] || {};
+    const displayName = conf.name || NAMES_FALLBACK[L] || L;
+    const n = scores[L];
+    const b = bandFromScore(bands, n);
+    const sentence =
+      (conf.text && conf.text[b.id]) ||
+      // 落空時的保底句（你可保留或刪除）
+      `（教材對應句待補）`;
+
+    singleLines.push(`${L} ${displayName}：${n}｜${b.label} —— ${sentence}`);
+  }
+
+  const singleText =
+    '【A～J 單點】\n\n' + singleLines.join('\n\n'); // 每點之間空一行較好讀
+
+  // === 綜合＋痛點 ===
+  // 抓絕對值最高的 3 個，讓使用者知道最需留意的面向
+  const top3 = Object.entries(scores)
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-    .slice(0, k);
-}
+    .slice(0, 3);
 
-async function pushMessage(to, messages) {
-  const resp = await fetchFn("https://api.line.me/v2/bot/message/push", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN || ""}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ to, messages }),
-  });
-  if (!resp.ok) {
-    console.error("Push API error:", resp.status, await resp.text().catch(() => ""));
+  const topText = top3
+    .map(([L, v]) => {
+      const conf = letters[L] || {};
+      const displayName = conf.name || NAMES_FALLBACK[L] || L;
+      const b = bandFromScore(bands, v);
+      return `${L} ${displayName}：${v}（${b.label}）`;
+    })
+    .join('、');
+
+  const comboText =
+    '【綜合重點】\n' +
+    `最需要留意／最有影響的面向：${topText || '整體較平均'}。\n` +
+    `躁狂（B 情緒）：${maniaB ? '有' : '無'}；躁狂（E 點）：${maniaE ? '有' : '無'}。\n` +
+    `年齡：${age || '未填'}；性別：${gender || '未填'}；日期：${date || '未填'}。`;
+
+  // === 人物側寫（極簡範例，之後你可把 RULES.persona.templates 換成教材句庫） ===
+  let personaText = '【人物側寫】\n';
+  if (top3.length >= 2) {
+    const [L1, v1] = top3[0];
+    const [L2, v2] = top3[1];
+    const name1 = (letters[L1]?.name || NAMES_FALLBACK[L1] || L1);
+    const name2 = (letters[L2]?.name || NAMES_FALLBACK[L2] || L2);
+    const dir1 = v1 >= 0 ? '偏高' : '偏低';
+    const dir2 = v2 >= 0 ? '偏高' : '偏低';
+    // 你可以把這句換成教材的人物側寫模板
+    personaText += `${name1}${dir1}、${name2}${dir2}；整體呈現「${dir1 === '偏高' ? '主動' : '保守'}、${dir2 === '偏高' ? '外放' : '內斂'}」傾向（示意）。`;
+  } else {
+    personaText += '整體表現較均衡。';
   }
-}
 
-// 解析 wants：支援 {single, combo, persona}、或陣列 ['single','combo']、或數字 [1,2]、或 'all'
-function parseWants(wants) {
-  if (!wants) return { single: true, combo: true, persona: true };
-  if (wants === "all") return { single: true, combo: true, persona: true };
+  // === 首段招呼 ===
+  const hello = `Hi ${name || ''}！已收到你的 OCA 分數。\n（年齡：${age || '未填'}，性別：${gender || '未填'}）`;
 
-  // 物件布林
-  if (typeof wants === "object" && !Array.isArray(wants)) {
-    const s = !!wants.single, c = !!wants.combo, p = !!wants.persona;
-    return { single: s || (!c && !p), combo: c || (!s && !p), persona: p || (!s && !c) };
+  // === 組裝訊息 ===
+  let fullTexts = [];
+  fullTexts.push(hello);
+  if (wants.single !== false) fullTexts.push(singleText);
+  if (wants.combo !== false) fullTexts.push(comboText);
+  if (wants.persona !== false) fullTexts.push(personaText);
+
+  // 分塊避免 5000 字上限
+  const chunks = [];
+  for (const t of fullTexts) {
+    for (const part of chunkByLimit(t, 4800)) {
+      chunks.push({ type: 'text', text: part });
+    }
   }
-
-  // 陣列或字串
-  const set = new Set(
-    (Array.isArray(wants) ? wants : [wants]).map((x) =>
-      String(x).toLowerCase().trim()
-    )
-  );
-  const flag = {
-    single: set.has("1") || set.has("single") || set.has("a~j") || set.has("a-j"),
-    combo: set.has("2") || set.has("combo") || set.has("綜合"),
-    persona: set.has("3") || set.has("persona") || set.has("側寫"),
-  };
-  if (!flag.single && !flag.combo && !flag.persona) return { single: true, combo: true, persona: true };
-  return flag;
+  return chunks;
 }
 
-// 安全切訊息
-function chunkText(str, limit = 4900) {
-  const out = [];
-  let s = String(str || "");
-  while (s.length > limit) {
-    out.push(s.slice(0, limit));
-    s = s.slice(limit);
-  }
-  out.push(s);
-  return out;
-}
-
-// ---------- HTTP Handler ----------
+// ========= HTTP handler =========
 module.exports = async (req, res) => {
   try {
-    if (req.method !== "POST") {
-      return res.status(405).send("Method Not Allowed");
+    if (req.method !== 'POST') {
+      return res.status(405).send('Method Not Allowed');
     }
 
-    if (!process.env.LINE_CHANNEL_ACCESS_TOKEN) {
-      console.error("Missing LINE_CHANNEL_ACCESS_TOKEN");
-      return res.status(500).json({ ok: false, msg: "Server config error" });
+    const RULES = await loadOcaRules();
+    if (!RULES) {
+      return res.status(500).json({ ok: false, msg: 'OCA 規則檔缺失' });
     }
 
-    // 支援 raw 或 JSON
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
+    // body 例：
+    // {
+    //   "userId": "...", "name": "...", "gender":"男/女/其他",
+    //   "age": 22, "date": "2025/09/02",
+    //   "maniaB": true, "maniaE": false,
+    //   "scores": {"A":10,"B":-20,...},
+    //   "wants": {"single":true,"combo":true,"persona":true}
+    // }
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+    const { userId, age, scores } = body;
 
-    // 參數
-    const userId = body.userId || body.to;
-    const name = (body.name || "").trim();
-    const gender = body.gender || body.sex || "";
-    const ageNum = Number(body.age);
-    const date = body.date || body.when || "";
-    const maniaB = !!body.maniaB; // 躁狂：B 情緒
-    const maniaE = !!body.maniaE; // 躁狂：E 點
-    const wants = parseWants(body.wants);
-    const rawScores = body.scores || body; // 允許直接傳 A~J 在根層
+    if (!userId) return res.status(400).json({ ok: false, msg: '缺少 userId' });
+    if (!age || Number(age) < 14) return res.status(400).json({ ok: false, msg: '年齡需 ≥ 14' });
+    if (!scores) return res.status(400).json({ ok: false, msg: '缺少分數' });
 
-    if (!userId) return res.status(400).json({ ok: false, msg: "缺少 userId" });
-    if (!Number.isFinite(ageNum) || ageNum < 14) {
-      return res.status(400).json({ ok: false, msg: "年齡需 ≥ 14" });
-    }
+    const messages = analyzeOCA(RULES, body);
 
-    const scores = normalizeScores(rawScores);
-
-    // --------- (一) A~J 單點（排版：每點間空一行） ---------
-    const singleLines = [];
-    for (const L of LETTERS) {
-      const n = scores[L];
-      const [lvl, hint] = bandDesc(n);
-      // 兩行：主行＋輔行，中間留空行會由 join("\n\n") 產生
-      const main = `${NAMES[L]}：${n} ｜ ${lvl}`;
-      const sub = `— ${hint}`;
-      singleLines.push(`${main}\n${sub}`);
-    }
-    const singleText = `【A~J 單點】\n` + singleLines.join(`\n\n`);
-
-    // --------- (二) 綜合重點（含教材式「症狀群」關聯解讀） ---------
-    const tops = topLetters(scores, 3);
-    const topText = tops
-      .map(([L, v]) => `${NAMES[L]}：${v}（${bandDesc(v)[0]}）`)
-      .join("、");
-
-    const maniaMsgs = [];
-    if (maniaB) maniaMsgs.push("躁狂（B 情緒）：有");
-    else maniaMsgs.push("躁狂（B 情緒）：無");
-    if (maniaE) maniaMsgs.push("躁狂（E 點）：有");
-    else maniaMsgs.push("躁狂（E 點）：無");
-
-    // 命中規則（症狀群 A~D）
-    const ruleHits = applyOcaRules(scores, { max: 6 }); // 最多 6 條避免過長
-    const combined =
-      `【綜合重點】\n最需要留意／最有影響的面向：${topText || "無特別突出"}。` +
-      `\n${maniaMsgs.join("；")}。` +
-      (ruleHits.length ? `\n關聯觀察（教材：症狀群）：\n- ${ruleHits.join("\n- ")}` : "") +
-      `\n日期：${date || "未填"}`;
-
-    // --------- (三) 人物側寫（簡短） ---------
-    let persona = "【人物側寫】\n";
-    if (tops.length >= 2) {
-      const [L1, v1] = tops[0];
-      const [L2, v2] = tops[1];
-      const dir1 = v1 >= 0 ? "偏高" : "偏低";
-      const dir2 = v2 >= 0 ? "偏高" : "偏低";
-      persona += `${NAMES[L1]}${dir1}、${NAMES[L2]}${dir2}；整體呈現「${
-        dir1 === "偏高" ? "主動" : "保守"
-      }、${dir2 === "偏高" ? "外放" : "內敛"}」傾向（示意）。`;
-    } else {
-      persona += "整體表現較均衡。";
-    }
-
-    // --------- 推播（自動切段避免 5000 字限制） ---------
-    const chunks = [];
-
-    // 開頭問候
-    const hello = `Hi ${name || ""}！已收到你的 OCA 分數。\n（年齡：${ageNum}，性別：${gender || "未填"}）`;
-    chunks.push(...chunkText(hello));
-
-    if (wants.single) chunks.push(...chunkText(singleText));
-    if (wants.combo) chunks.push(...chunkText(combined));
-    if (wants.persona) chunks.push(...chunkText(persona));
-
-    // 組成 LINE 訊息陣列並送出
-    const messages = chunks.map((t) => ({ type: "text", text: t }));
     await pushMessage(userId, messages);
-
     return res.status(200).json({ ok: true });
   } catch (e) {
-    console.error("[submit-oca] error:", e);
-    return res.status(500).send("Server Error");
+    console.error(e);
+    return res.status(500).send('Server Error');
   }
 };
