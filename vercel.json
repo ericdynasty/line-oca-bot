@@ -1,6 +1,9 @@
 {
   "version": 2,
   "functions": {
-    "api/*.js": { "maxDuration": 30, "memory": 1536 }
+    "api/**/*.js": {
+      "runtime": "nodejs18.x",
+      "includeFiles": ["data/oca_rules.json"]
+    }
   }
 }
