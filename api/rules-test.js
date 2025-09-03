@@ -1,32 +1,26 @@
 // api/rules-test.js
-// 讀 data/oca_rules.json 的健康檢查；使用你目前的 loadRulesSafe
+// 確認 /api 路由與讀檔沒問題的最小測試
 
-const { loadRulesSafe } = require('./_oca_rules');
+const fs = require('fs');
+const path = require('path');
 
-module.exports = async (req, res) => {
-  const out = loadRulesSafe(); // 同步讀檔（你目前的寫法）
+module.exports = (req, res) => {
+  try {
+    const file = path.join(process.cwd(), 'data', 'oca_rules.json');
+    const raw = fs.readFileSync(file, 'utf8');
+    const json = JSON.parse(raw);
 
-  if (!out.ok) {
-    return res.status(500).json(out); // 把錯誤也回給你看
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.status(200).json({
+      ok: true,
+      countKeys: Object.keys(json || {}).length,
+      previewKeys: Object.keys(json || {}).slice(0, 5),
+      source: 'file:' + file
+    });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      err: String(e)
+    });
   }
-
-  const rules = out.rules || {};
-  const sections = Object.keys(rules);
-  const counts = {};
-  let total = 0;
-
-  for (const k of sections) {
-    const arr = Array.isArray(rules[k]) ? rules[k] : [];
-    counts[k] = arr.length;
-    total += arr.length;
-  }
-
-  return res.status(200).json({
-    ok: true,
-    from: out.meta && out.meta.source,
-    size: out.meta && out.meta.size,
-    sections,
-    counts,
-    total
-  });
 };
