@@ -1,44 +1,54 @@
 // api/_oca_rules.js
-// 安全載入規則檔（永不丟例外）
+// 安全載入教材規則：先嘗試讀檔，失敗就改走 HTTP 讀取 /data/oca_rules.json
 
 const fs = require('fs');
 const path = require('path');
 
-function loadRulesSafe() {
-  const file = path.join(process.cwd(), 'data', 'oca_rules.json');
+function readViaFs() {
   try {
-    const raw = fs.readFileSync(file, 'utf8');
-    try {
-      const json = JSON.parse(raw); // 這裡若 JSON 不合法會丟錯，但我們會抓住
-      return {
-        ok: true,
-        meta: {
-          source: `file:${file}`,
-          bytes: Buffer.byteLength(raw, 'utf8'),
-          keys: Array.isArray(json) ? [] : Object.keys(json).slice(0, 20),
-        },
-        rules: json, // 先全量回給你檢查，之後要精簡再說
-      };
-    } catch (parseErr) {
-      return {
-        ok: false,
-        reason: 'parse_error',
-        meta: {
-          source: `file:${file}`,
-          bytes: Buffer.byteLength(raw, 'utf8'),
-        },
-        error: String(parseErr && (parseErr.stack || parseErr.message || parseErr)),
-        preview: raw.slice(0, 400), // 讓你快速看到開頭內容
-      };
-    }
-  } catch (ioErr) {
-    return {
-      ok: false,
-      reason: 'fs_read_error',
-      meta: { source: `file:${file}` },
-      error: String(ioErr && (ioErr.stack || ioErr.message || ioErr)),
-    };
+    const p = path.join(process.cwd(), 'data', 'oca_rules.json');
+    const raw = fs.readFileSync(p, 'utf8');
+    return { ok: true, data: JSON.parse(raw), source: 'fs' };
+  } catch (err) {
+    return { ok: false, err };
   }
+}
+
+async function readViaHttp(host) {
+  try {
+    const base =
+      process.env.PUBLIC_BASE_URL ||
+      (host ? `https://${host}` : '');
+
+    if (!base) throw new Error('no base url to fetch /data/oca_rules.json');
+
+    const url = `${base}/data/oca_rules.json`;
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} when GET ${url}`);
+    const data = await resp.json();
+    return { ok: true, data, source: 'http', url };
+  } catch (err) {
+    return { ok: false, err };
+  }
+}
+
+async function loadRulesSafe(host) {
+  const fsRes = readViaFs();
+  if (fsRes.ok) {
+    return { ok: true, rules: fsRes.data, meta: { source: fsRes.source } };
+  }
+  const httpRes = await readViaHttp(host);
+  if (httpRes.ok) {
+    return { ok: true, rules: httpRes.data, meta: { source: httpRes.source, url: httpRes.url } };
+  }
+  return {
+    ok: false,
+    rules: null,
+    meta: {
+      fsError: String(fsRes.err && (fsRes.err.message || fsRes.err)),
+      httpError: String(httpRes.err && (httpRes.err.message || httpRes.err)),
+    },
+  };
 }
 
 module.exports = { loadRulesSafe };
