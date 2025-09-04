@@ -1,38 +1,49 @@
-// api/_oca_rules.js
-// 使用 ESM 讀取 /data/oca_rules.json，安全包一層不讓函式崩潰
+// api/_oca_rules.js — 讀取 /data/oca_rules.json（ESM）
+// 先嘗試讀檔案；失敗就改用 HTTP 讀靜態資源，避免 Serverless 路徑差異。
 
-import fs from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname  = path.dirname(__filename);
 
-export async function loadRulesSafe() {
-  // __dirname 是 /api，往上一層到專案根，再進 data/oca_rules.json
-  const file = path.join(__dirname, '..', 'data', 'oca_rules.json');
+async function readViaFs() {
+  const candidates = [
+    path.join(process.cwd(), 'data', 'oca_rules.json'),
+    path.join(__dirname, '..', 'data', 'oca_rules.json'),
+  ];
+  for (const file of candidates) {
+    try {
+      const raw = await readFile(file, 'utf8');
+      return { ok: true, rules: JSON.parse(raw), meta: { source: `file:${file}` } };
+    } catch (_) { /* try next */ }
+  }
+  return { ok: false, error: 'FS_READ_FAIL' };
+}
 
+async function readViaHttp(req) {
   try {
-    const raw = await fs.readFile(file, 'utf8');
-    const rules = JSON.parse(raw);
-    return {
-      ok: true,
-      rules,
-      meta: {
-        source: `file:${file}`,
-        size: Buffer.byteLength(raw, 'utf8'),
-      },
-    };
+    const host  = (req?.headers?.['x-forwarded-host'] || req?.headers?.host || process.env.VERCEL_URL || '').toString();
+    const proto = (req?.headers?.['x-forwarded-proto'] || 'https').toString();
+    if (!host) throw new Error('no host');
+    const base = /^https?:\/\//.test(host) ? host : `${proto}://${host}`;
+    const url  = `${base}/data/oca_rules.json`;
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const rules = await resp.json();
+    return { ok: true, rules, meta: { source: 'http', url } };
   } catch (err) {
-    return {
-      ok: false,
-      rules: null,
-      meta: {
-        source: `file:${file}`,
-        error: String(err?.stack || err),
-      },
-    };
+    return { ok: false, error: `HTTP_READ_FAIL: ${err?.message || err}` };
   }
 }
 
-export default { loadRulesSafe };
+export async function loadRules(req) {
+  const a = await readViaFs();
+  if (a.ok) return a;
+  const b = await readViaHttp(req);
+  if (b.ok) return b;
+  return { ok: false, error: `${a.error} & ${b.error}` };
+}
+
+export default { loadRules };
