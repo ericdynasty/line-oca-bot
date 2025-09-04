@@ -1,16 +1,19 @@
-// api/_oca_rules.js  (ESM 版本)
+// api/_oca_rules.js
+// 使用 ESM 讀取 /data/oca_rules.json，安全包一層不讓函式崩潰
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export function loadRulesSafe() {
+export async function loadRulesSafe() {
+  // __dirname 是 /api，往上一層到專案根，再進 data/oca_rules.json
   const file = path.join(__dirname, '..', 'data', 'oca_rules.json');
+
   try {
-    const raw = fs.readFileSync(file, 'utf8');
+    const raw = await fs.readFile(file, 'utf8');
     const rules = JSON.parse(raw);
     return {
       ok: true,
@@ -26,10 +29,10 @@ export function loadRulesSafe() {
       rules: null,
       meta: {
         source: `file:${file}`,
-        error: err?.stack || err?.message || String(err),
+        error: String(err?.stack || err),
       },
     };
   }
 }
 
-export default loadRulesSafe;
+export default { loadRulesSafe };
