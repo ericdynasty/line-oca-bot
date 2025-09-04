@@ -1,13 +1,26 @@
 // api/rules-test.js
-// 測試規則檔是否能被讀到（對外路徑 /api/rules-test）
+// 簡易健康檢查端點：永不丟例外，直接輸出 JSON 結果
 
 const { loadRulesSafe } = require('./_oca_rules');
 
 module.exports = async (req, res) => {
-  const ret = loadRulesSafe();
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
-  res.status(200).json(ret);
-};
 
-// 強制使用 Node.js runtime（因為我們要用 fs）
-module.exports.config = { runtime: 'nodejs20.x' };
+  try {
+    const result = loadRulesSafe();
+    // 無論成功/失敗都回 200，把細節交給 result.ok 判斷
+    res.status(200).end(JSON.stringify(result, null, 2));
+  } catch (e) {
+    // 最外層保險絲
+    res
+      .status(200)
+      .end(
+        JSON.stringify(
+          { ok: false, reason: 'top_level_catch', error: String(e && (e.stack || e.message || e)) },
+          null,
+          2
+        )
+      );
+  }
+};
