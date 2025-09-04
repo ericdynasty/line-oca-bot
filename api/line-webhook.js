@@ -1,21 +1,15 @@
-// api/line-webhook.js
-// v5: 穩定版狀態機：兩段式歡迎詞只發一次；數字選單與文字都可；支援取消/重新開始/填表；修正姓名後卡住
+// api/line-webhook.js  (ESM, Node 22)
+// v5-esm: 修正 ESM/Node22 相容；兩段式歡迎詞只發一次；數字/文字都可；支援 取消/重新開始/填表；穩定狀態機
 
-const crypto = require('crypto');
+import crypto from 'node:crypto';
 
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || '';
 const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
 
-/* ---------- 共用 LINE HTTP ---------- */
-async function fetchFn(...args) {
-  if (typeof fetch === 'function') return fetch(...args);
-  const m = await import('node-fetch');
-  return m.default(...args);
-}
-
-async function reply(replyToken, messages) {
+/* ---------- LINE HTTP ---------- */
+async function lineReply(replyToken, messages) {
   const body = { replyToken, messages: Array.isArray(messages) ? messages : [messages] };
-  const res = await fetchFn('https://api.line.me/v2/bot/message/reply', {
+  const res = await fetch('https://api.line.me/v2/bot/message/reply', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
@@ -28,24 +22,8 @@ async function reply(replyToken, messages) {
   }
 }
 
-async function push(to, messages) {
-  const body = { to, messages: Array.isArray(messages) ? messages : [messages] };
-  const res = await fetchFn('https://api.line.me/v2/bot/message/push', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    console.error('Push API error:', res.status, await res.text().catch(() => ''));
-  }
-}
-
-/* ---------- 簡易記憶體狀態（單機） ---------- */
-const SESS = new Map(); // key: userId, val: { step, data, greeted }
-
+/* ---------- In-Memory Session (單機) ---------- */
+const SESS = new Map(); // key: userId -> { step, data, greeted }
 function getSess(uid) {
   if (!SESS.has(uid)) SESS.set(uid, { step: 'idle', data: {}, greeted: false });
   return SESS.get(uid);
@@ -74,7 +52,6 @@ const MSG = {
   nextMark: '（收到，下一步）',
 };
 
-/* ---------- Quick Replies ---------- */
 const QR = {
   start: [
     { type: 'action', action: { type: 'message', label: '填表', text: '填表' } },
@@ -90,30 +67,28 @@ const QR = {
     { type: 'action', action: { type: 'message', label: '1 有', text: '1' } },
     { type: 'action', action: { type: 'message', label: '2 無', text: '2' } },
   ],
-  date: [
-    { type: 'action', action: { type: 'message', label: '1 今天', text: '1' } },
-  ],
+  date: [{ type: 'action', action: { type: 'message', label: '1 今天', text: '1' } }],
 };
 
-/* ---------- 幫手 ---------- */
-function normalizeInt(s) {
+/* ---------- 小幫手 ---------- */
+const toInt = s => {
   const n = Number(String(s).trim());
   return Number.isFinite(n) ? n : NaN;
-}
-function toYesNo(s) {
+};
+const toYesNo = s => {
   const t = String(s).trim();
   if (t === '1' || /^(有|yes|y)$/i.test(t)) return true;
   if (t === '2' || /^(無|no|n)$/i.test(t)) return false;
   return null;
-}
-function parseGender(s) {
+};
+const parseGender = s => {
   const t = String(s).trim();
   if (t === '1' || /^男$/.test(t)) return '男';
   if (t === '2' || /^女$/.test(t)) return '女';
   if (t === '3' || /^其他$/.test(t)) return '其他';
   return null;
-}
-function parseDateInput(s) {
+};
+const parseDateInput = s => {
   const t = String(s).trim();
   if (t === '1') {
     const d = new Date();
@@ -122,59 +97,55 @@ function parseDateInput(s) {
     const dd = String(d.getDate()).padStart(2, '0');
     return `${yyyy}/${mm}/${dd}`;
   }
-  // YYYY/MM/DD
   if (/^\d{4}\/\d{2}\/\d{2}$/.test(t)) return t;
   return null;
-}
+};
 
-/* ---------- 主流程 ---------- */
-
-module.exports = async (req, res) => {
+/* ---------- Handler (ESM) ---------- */
+export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-  // 驗證簽名（可選）
+
+  // 簽名驗證（有設才驗）
   const signature = req.headers['x-line-signature'];
   if (CHANNEL_SECRET && signature) {
-    const body = JSON.stringify(req.body);
-    const hmac = crypto.createHmac('sha256', CHANNEL_SECRET).update(body).digest('base64');
-    if (hmac !== signature) {
-      return res.status(401).send('Bad signature');
-    }
+    const bodyStr = JSON.stringify(req.body);
+    const mac = crypto.createHmac('sha256', CHANNEL_SECRET).update(bodyStr).digest('base64');
+    if (mac !== signature) return res.status(401).send('Bad signature');
   }
 
   try {
-    const events = req.body.events || [];
-    for (const ev of events) {
-      if (ev.type !== 'message' || ev.message.type !== 'text') continue;
+    const events = req.body?.events ?? [];
+    for (const e of events) {
+      if (e.type !== 'message' || e.message?.type !== 'text') continue;
 
-      const text = String(ev.message.text || '').trim();
-      const uid = ev.source?.userId || '';
-      const replyToken = ev.replyToken;
+      const text = String(e.message.text || '').trim();
+      const uid = e.source?.userId || '';
+      const replyToken = e.replyToken;
       if (!uid) continue;
 
-      // 指令：取消 / 重新開始 / 填表
+      // 全域指令
       if (/^取消$/.test(text)) {
         resetSess(uid);
-        await reply(replyToken, { type: 'text', text: MSG.canceled, quickReply: { items: QR.start } });
+        await lineReply(replyToken, {
+          type: 'text',
+          text: MSG.canceled,
+          quickReply: { items: QR.start },
+        });
         continue;
       }
       if (/^重新開始$/.test(text)) {
         resetSess(uid);
-        await reply(replyToken, {
-          type: 'text',
-          text: MSG.restarted,
-          quickReply: { items: QR.start },
-        });
-        // 直接進入姓名
+        await lineReply(replyToken, { type: 'text', text: MSG.restarted, quickReply: { items: QR.start } });
         const s = getSess(uid);
         s.step = 'name';
-        await reply(replyToken, { type: 'text', text: MSG.hello2 });
+        await lineReply(replyToken, { type: 'text', text: MSG.hello2 });
         continue;
       }
       if (/^填表$/.test(text)) {
         const s = getSess(uid);
+        s.greeted = true;
         s.step = 'name';
-        s.greeted = true; // 視為已歡迎
-        await reply(replyToken, [
+        await lineReply(replyToken, [
           { type: 'text', text: MSG.hello1 },
           { type: 'text', text: MSG.hello2 },
         ]);
@@ -184,11 +155,11 @@ module.exports = async (req, res) => {
       // 狀態機
       const s = getSess(uid);
 
-      // 首次歡迎：只發一次
+      // 首次歡迎
       if (s.step === 'idle' && !s.greeted) {
         s.greeted = true;
         s.step = 'name';
-        await reply(replyToken, [
+        await lineReply(replyToken, [
           { type: 'text', text: MSG.hello1 },
           { type: 'text', text: MSG.hello2, quickReply: { items: QR.start } },
         ]);
@@ -196,26 +167,23 @@ module.exports = async (req, res) => {
       }
 
       switch (s.step) {
-        case 'idle': {
-          // 已歡迎但還沒開始：提示「填表」
-          await reply(replyToken, {
+        case 'idle':
+          await lineReply(replyToken, {
             type: 'text',
             text: `輸入「填表」即可開始聊天填表。\n${MSG.cancelHint}`,
             quickReply: { items: QR.start },
           });
           break;
-        }
 
         case 'name': {
-          // 任何非空白視為姓名
           const name = text.trim();
           if (!name) {
-            await reply(replyToken, { type: 'text', text: '請輸入姓名（不可空白）。' });
+            await lineReply(replyToken, { type: 'text', text: '請輸入姓名（不可空白）。' });
             break;
           }
           s.data.name = name;
           s.step = 'gender';
-          await reply(replyToken, {
+          await lineReply(replyToken, {
             type: 'text',
             text: `${MSG.nextMark}\n${MSG.gender}`,
             quickReply: { items: QR.gender },
@@ -226,7 +194,7 @@ module.exports = async (req, res) => {
         case 'gender': {
           const g = parseGender(text);
           if (!g) {
-            await reply(replyToken, {
+            await lineReply(replyToken, {
               type: 'text',
               text: MSG.badInput + '\n' + MSG.gender,
               quickReply: { items: QR.gender },
@@ -235,30 +203,26 @@ module.exports = async (req, res) => {
           }
           s.data.gender = g;
           s.step = 'age';
-          await reply(replyToken, { type: 'text', text: MSG.age });
+          await lineReply(replyToken, { type: 'text', text: MSG.age });
           break;
         }
 
         case 'age': {
-          const n = normalizeInt(text);
+          const n = toInt(text);
           if (!Number.isFinite(n) || n < 14 || n > 120) {
-            await reply(replyToken, { type: 'text', text: '年齡需是 14~120 的整數，請重新輸入。' });
+            await lineReply(replyToken, { type: 'text', text: '年齡需是 14~120 的整數，請重新輸入。' });
             break;
           }
           s.data.age = n;
           s.step = 'date';
-          await reply(replyToken, {
-            type: 'text',
-            text: MSG.date,
-            quickReply: { items: QR.date },
-          });
+          await lineReply(replyToken, { type: 'text', text: MSG.date, quickReply: { items: QR.date } });
           break;
         }
 
         case 'date': {
           const d = parseDateInput(text);
           if (!d) {
-            await reply(replyToken, {
+            await lineReply(replyToken, {
               type: 'text',
               text: MSG.badInput + '\n' + MSG.date,
               quickReply: { items: QR.date },
@@ -267,18 +231,14 @@ module.exports = async (req, res) => {
           }
           s.data.date = d;
           s.step = 'maniaB';
-          await reply(replyToken, {
-            type: 'text',
-            text: MSG.maniaB,
-            quickReply: { items: QR.yesno },
-          });
+          await lineReply(replyToken, { type: 'text', text: MSG.maniaB, quickReply: { items: QR.yesno } });
           break;
         }
 
         case 'maniaB': {
           const v = toYesNo(text);
           if (v === null) {
-            await reply(replyToken, {
+            await lineReply(replyToken, {
               type: 'text',
               text: MSG.badInput + '\n' + MSG.maniaB,
               quickReply: { items: QR.yesno },
@@ -287,18 +247,14 @@ module.exports = async (req, res) => {
           }
           s.data.maniaB = v;
           s.step = 'maniaE';
-          await reply(replyToken, {
-            type: 'text',
-            text: MSG.maniaE,
-            quickReply: { items: QR.yesno },
-          });
+          await lineReply(replyToken, { type: 'text', text: MSG.maniaE, quickReply: { items: QR.yesno } });
           break;
         }
 
         case 'maniaE': {
           const v = toYesNo(text);
           if (v === null) {
-            await reply(replyToken, {
+            await lineReply(replyToken, {
               type: 'text',
               text: MSG.badInput + '\n' + MSG.maniaE,
               quickReply: { items: QR.yesno },
@@ -307,7 +263,7 @@ module.exports = async (req, res) => {
           }
           s.data.maniaE = v;
           s.step = 'wants';
-          await reply(replyToken, { type: 'text', text: MSG.wants });
+          await lineReply(replyToken, { type: 'text', text: MSG.wants });
           break;
         }
 
@@ -323,37 +279,33 @@ module.exports = async (req, res) => {
               if (p === '3') wants.persona = true;
             }
             if (!wants.single && !wants.combo && !wants.persona) {
-              await reply(replyToken, { type: 'text', text: MSG.badInput + '\n' + MSG.wants });
+              await lineReply(replyToken, { type: 'text', text: MSG.badInput + '\n' + MSG.wants });
               break;
             }
           }
           s.data.wants = wants;
-          // 進入 A~J 分數填寫導引（由 /api/form 或 /api/submit-oca 負責）
           s.step = 'scores';
-          await reply(replyToken, { type: 'text', text: '好的，接下來請依 A~J 項目輸入 -100～100 的分數。' });
-          // 交給既有的表單/流程處理（不在此檔內），此處只負責對話頭
+          await lineReply(replyToken, { type: 'text', text: '好的，接下來請依 A~J 項目輸入 -100～100 的分數。' });
           break;
         }
 
         case 'scores': {
-          // 這一步通常由 /api/form 交互式逐點詢問；若直接輸入「分析」亦接受
           if (/^(分析|送出|全部)$/.test(text)) {
-            await reply(replyToken, { type: 'text', text: '分析處理中，請稍候…' });
+            await lineReply(replyToken, { type: 'text', text: '分析處理中，請稍候…' });
           } else {
-            await reply(replyToken, { type: 'text', text: '請依提示輸入各點分數，或輸入「分析」送出。' });
+            await lineReply(replyToken, { type: 'text', text: '請依提示輸入各點分數，或輸入「分析」送出。' });
           }
           break;
         }
 
-        default: {
-          await reply(replyToken, { type: 'text', text: MSG.already });
-        }
+        default:
+          await lineReply(replyToken, { type: 'text', text: MSG.already });
       }
     }
 
     res.status(200).json({ ok: true });
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    console.error(err);
     res.status(500).send('Server Error');
   }
-};
+}
