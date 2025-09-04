@@ -1,7 +1,7 @@
 {
   "name": "line-oca-bot",
   "private": true,
-  "type": "commonjs",
+  "type": "module",
   "engines": {
     "node": ">=18"
   },
