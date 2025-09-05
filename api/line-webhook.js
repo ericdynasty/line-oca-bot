@@ -1,7 +1,6 @@
 // api/line-webhook.js  (ESM; Node 18+/22 on Vercel)
 import crypto from "node:crypto";
 
-// ---------- 基本設定 ----------
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || "";
 const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || "";
 const BASE =
@@ -10,58 +9,45 @@ const BASE =
     ""
   );
 
-if (!CHANNEL_SECRET || !CHANNEL_ACCESS_TOKEN) {
-  console.warn(
-    "[line-webhook] Missing env: LINE_CHANNEL_SECRET or LINE_CHANNEL_ACCESS_TOKEN"
-  );
-}
-
-// ---------- 小工具 ----------
 async function replyText(replyToken, text) {
   const url = "https://api.line.me/v2/bot/message/reply";
-  const body = {
-    replyToken,
-    messages: [{ type: "text", text: String(text).slice(0, 5000) }],
-  };
   await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      replyToken,
+      messages: [{ type: "text", text: String(text).slice(0, 5000) }],
+    }),
   });
 }
-
 async function replyMessages(replyToken, messages) {
   const url = "https://api.line.me/v2/bot/message/reply";
-  const body = { replyToken, messages };
   await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ replyToken, messages }),
   });
 }
-
 async function pushText(userId, text) {
   const url = "https://api.line.me/v2/bot/message/push";
-  const body = {
-    to: userId,
-    messages: [{ type: "text", text: String(text).slice(0, 5000) }],
-  };
   await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}`,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      to: userId,
+      messages: [{ type: "text", text: String(text).slice(0, 5000) }],
+    }),
   });
 }
-
 function signIsValid(body, signature) {
   const hmac = crypto
     .createHmac("sha256", CHANNEL_SECRET)
@@ -69,7 +55,14 @@ function signIsValid(body, signature) {
     .digest("base64");
   return hmac === signature;
 }
-
+function qr(items) {
+  return {
+    items: items.map(([label, text]) => ({
+      type: "action",
+      action: { type: "message", label, text },
+    })),
+  };
+}
 const AJ_LABELS = {
   A: "穩定性",
   B: "愉快",
@@ -82,41 +75,26 @@ const AJ_LABELS = {
   I: "欣賞能力",
   J: "溝通能力",
 };
-const AJ_KEYS = Object.keys(AJ_LABELS); // ["A","B",...,"J"]
-
-// 伺服器記憶體暫存（serverless 可能重啟遺失，但和你現有行為一致）
-const FLOW = new Map(); // userId -> state
-
+const AJ_KEYS = Object.keys(AJ_LABELS);
+const FLOW = new Map();
 function startState() {
   return {
-    step: "name", // name -> gender -> age -> maniaB -> maniaE -> A..J -> want -> done
+    step: "name",
     name: "",
-    gender: "", // 男 / 女 / 其他
+    gender: "",
     age: 0,
-    maniaB: null, // true/false
-    maniaE: null, // true/false
-    scores: {}, // {A: n, ... J: n}
-    want: 4, // 1~4
+    maniaB: null,
+    maniaE: null,
+    scores: {},
+    want: 4,
   };
 }
-
 function parseIntStrict(s) {
   if (typeof s !== "string") return NaN;
   if (!/^-?\d+$/.test(s.trim())) return NaN;
   return parseInt(s.trim(), 10);
 }
 
-function qr(items) {
-  // 快速回覆
-  return {
-    items: items.map(([label, text]) => ({
-      type: "action",
-      action: { type: "message", label, text },
-    })),
-  };
-}
-
-// ---------- 呼叫正式分析 API ----------
 async function callAnalyzeAndReply(lineReplyToken, userId, payload) {
   try {
     const resp = await fetch(`${BASE}/api/analyze`, {
@@ -124,7 +102,6 @@ async function callAnalyzeAndReply(lineReplyToken, userId, payload) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     if (!resp.ok) {
       const t = await resp.text().catch(() => "");
       await replyText(
@@ -134,8 +111,6 @@ async function callAnalyzeAndReply(lineReplyToken, userId, payload) {
       return;
     }
     const data = await resp.json().catch(() => ({}));
-
-    // 期待：{ ok:true, messages:[ "段落1", "段落2", ... ] }
     let msgs = [];
     if (Array.isArray(data.messages)) {
       msgs = data.messages.filter(Boolean).map((t) => ({
@@ -146,16 +121,13 @@ async function callAnalyzeAndReply(lineReplyToken, userId, payload) {
       const guess = data.result || data.text || JSON.stringify(data);
       msgs = [{ type: "text", text: String(guess).slice(0, 5000) }];
     }
-
-    // LINE reply 一次最多 5 則
     const first = msgs.slice(0, 5);
     if (first.length) {
       await replyMessages(lineReplyToken, first);
     } else {
       await replyText(lineReplyToken, "（沒有可顯示的內容）");
     }
-    const remain = msgs.slice(5);
-    for (const m of remain) {
+    for (const m of msgs.slice(5)) {
       await pushText(userId, m.text);
     }
   } catch (err) {
@@ -166,29 +138,32 @@ async function callAnalyzeAndReply(lineReplyToken, userId, payload) {
   }
 }
 
-// ---------- 主處理 ----------
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).send("Method Not Allowed");
-  }
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
-  // 簽章驗證
+  // 讀 raw body + 驗簽
   const rawBody = await req.arrayBuffer();
   const bodyText = Buffer.from(rawBody).toString("utf8");
-  const okSig = signIsValid(bodyText, req.headers["x-line-signature"]);
-  if (!okSig) {
+  if (!signIsValid(bodyText, req.headers["x-line-signature"])) {
     return res.status(401).send("Bad signature");
   }
 
-  const body = JSON.parse(bodyText);
-  const events = Array.isArray(body.events) ? body.events : [];
+  // ★★★ 重點：LINE 後台「驗證」會送 body='test'，不是 JSON
+  let parsed;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    // 驗證 ping：直接回 200，讓你能把 Webhook 打開
+    return res.status(200).send("OK");
+  }
 
+  const events = Array.isArray(parsed.events) ? parsed.events : [];
   for (const evt of events) {
     if (evt.type !== "message" || evt.message?.type !== "text") continue;
 
     const userId = evt.source?.userId;
-    const text = (evt.message.text || "").trim();
     const replyToken = evt.replyToken;
+    const text = (evt.message.text || "").trim();
 
     // 指令
     if (["取消", "重新開始"].includes(text)) {
@@ -199,7 +174,6 @@ export default async function handler(req, res) {
     if (text === "填表") {
       const s = startState();
       FLOW.set(userId, s);
-      // 歡迎詞分兩則
       await replyMessages(replyToken, [
         { type: "text", text: "您好，我是 Eric 的 OCA 助理，我會逐一詢問您每項資料，請您確實填寫，謝謝。" },
         {
@@ -211,15 +185,12 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // 流程
     const state = FLOW.get(userId) || null;
     if (!state) {
-      // 非流程狀態，提示如何開始
       await replyText(replyToken, '輸入「填表」即可開始。');
       continue;
     }
 
-    // === name ===
     if (state.step === "name") {
       state.name = text.slice(0, 50);
       state.step = "gender";
@@ -232,19 +203,13 @@ export default async function handler(req, res) {
       ]);
       continue;
     }
-
-    // === gender ===
     if (state.step === "gender") {
       let g = text;
       if (text === "1") g = "男";
       else if (text === "2") g = "女";
       else if (text === "3") g = "其他";
-
       if (!["男", "女", "其他"].includes(g)) {
-        await replyText(
-          replyToken,
-          "請輸入 1（男）/ 2（女）/ 3（其他）。"
-        );
+        await replyText(replyToken, "請輸入 1（男）/ 2（女）/ 3（其他）。");
         continue;
       }
       state.gender = g;
@@ -252,8 +217,6 @@ export default async function handler(req, res) {
       await replyText(replyToken, "請輸入年齡（整數；例如 25）：");
       continue;
     }
-
-    // === age ===
     if (state.step === "age") {
       const n = parseIntStrict(text);
       if (!Number.isFinite(n) || n <= 0 || n > 120) {
@@ -271,8 +234,6 @@ export default async function handler(req, res) {
       ]);
       continue;
     }
-
-    // === maniaB ===
     if (state.step === "maniaB") {
       if (!["1", "2"].includes(text)) {
         await replyText(replyToken, "請輸入 1（有）或 2（無）。");
@@ -289,8 +250,6 @@ export default async function handler(req, res) {
       ]);
       continue;
     }
-
-    // === maniaE ===
     if (state.step === "maniaE") {
       if (!["1", "2"].includes(text)) {
         await replyText(replyToken, "請輸入 1（有）或 2（無）。");
@@ -298,23 +257,17 @@ export default async function handler(req, res) {
       }
       state.maniaE = text === "1";
       state.step = "score_A";
-      await replyText(
-        replyToken,
-        `請輸入 A（${AJ_LABELS.A}）分數（-100 ~ 100）：`
-      );
+      await replyText(replyToken, `請輸入 A（${AJ_LABELS.A}）分數（-100 ~ 100）：`);
       continue;
     }
-
-    // === A~J 分數 ===
     if (state.step?.startsWith("score_")) {
-      const key = state.step.split("_")[1]; // "A".."J"
+      const key = state.step.split("_")[1];
       const n = parseIntStrict(text);
       if (!Number.isFinite(n) || n < -100 || n > 100) {
         await replyText(replyToken, "格式不對，請輸入 -100 ~ 100 的整數。");
         continue;
       }
       state.scores[key] = n;
-
       const idx = AJ_KEYS.indexOf(key);
       const nextIdx = idx + 1;
       if (nextIdx < AJ_KEYS.length) {
@@ -326,8 +279,6 @@ export default async function handler(req, res) {
         );
         continue;
       }
-
-      // J 完成
       state.step = "want";
       await replyMessages(replyToken, [
         {
@@ -345,8 +296,6 @@ export default async function handler(req, res) {
       ]);
       continue;
     }
-
-    // === want ===
     if (state.step === "want") {
       const v = parseIntStrict(text);
       if (![1, 2, 3, 4].includes(v)) {
@@ -356,25 +305,21 @@ export default async function handler(req, res) {
       state.want = v;
       state.step = "done";
 
-      // 整理 payload 丟 /api/analyze
       const payload = {
         name: state.name,
         gender: state.gender,
         age: state.age,
         mania: { B: !!state.maniaB, E: !!state.maniaE },
-        scores: state.scores, // {A..J}
-        view: state.want, // 1~4
+        scores: state.scores,
+        view: state.want,
       };
-
       await replyText(replyToken, "分析處理中，請稍候...");
       await callAnalyzeAndReply(replyToken, userId, payload);
 
-      // 清掉流程
       FLOW.delete(userId);
       continue;
     }
 
-    // 其他狀態 fallback
     await replyText(replyToken, "請依指示輸入或輸入「取消」「重新開始」。");
   }
 
