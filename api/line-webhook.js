@@ -1,5 +1,5 @@
 // api/line-webhook.js  (ESM, Node 22)
-// v5-esm: 修正 ESM/Node22 相容；兩段式歡迎詞只發一次；數字/文字都可；支援 取消/重新開始/填表；穩定狀態機
+// v6: 修正「想看內容=全部」會誤觸送出；新增 A~J 逐題輸入（-100~100），完成後才可「分析」送出
 
 import crypto from 'node:crypto';
 
@@ -22,8 +22,8 @@ async function lineReply(replyToken, messages) {
   }
 }
 
-/* ---------- In-Memory Session (單機) ---------- */
-const SESS = new Map(); // key: userId -> { step, data, greeted }
+/* ---------- In-Memory Session ---------- */
+const SESS = new Map(); // userId -> session
 function getSess(uid) {
   if (!SESS.has(uid)) SESS.set(uid, { step: 'idle', data: {}, greeted: false });
   return SESS.get(uid);
@@ -50,6 +50,7 @@ const MSG = {
   wants: '想看的內容（可多選，空白代表全部）：\n1. A~J 單點\n2. 綜合重點\n3. 人物側寫\n請輸入像「1,2」或「全部」。',
   badInput: '看起來格式不對，請再試一次。',
   nextMark: '（收到，下一步）',
+  afterScores: 'A~J 分數已填完。若要產生結果，請輸入「分析」。\n（或輸入「重新開始」重來）',
 };
 
 const QR = {
@@ -68,6 +69,24 @@ const QR = {
     { type: 'action', action: { type: 'message', label: '2 無', text: '2' } },
   ],
   date: [{ type: 'action', action: { type: 'message', label: '1 今天', text: '1' } }],
+};
+
+/* ---------- A~J 定義 ---------- */
+const POINTS = [
+  { key: 'A', name: '穩定性' },
+  { key: 'B', name: '愉快' },
+  { key: 'C', name: '鎮定' },
+  { key: 'D', name: '確定力' },
+  { key: 'E', name: '活躍' },
+  { key: 'F', name: '積極' },
+  { key: 'G', name: '負責' },
+  { key: 'H', name: '評估能力' },
+  { key: 'I', name: '欣賞能力' },
+  { key: 'J', name: '溝通能力' },
+];
+const scorePrompt = (idx) => {
+  const p = POINTS[idx];
+  return `請輸入 ${p.key}（${p.name}）分數（-100～100）：`;
 };
 
 /* ---------- 小幫手 ---------- */
@@ -101,7 +120,7 @@ const parseDateInput = s => {
   return null;
 };
 
-/* ---------- Handler (ESM) ---------- */
+/* ---------- 主 Handler ---------- */
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
@@ -123,14 +142,10 @@ export default async function handler(req, res) {
       const replyToken = e.replyToken;
       if (!uid) continue;
 
-      // 全域指令
+      /* 全域指令 */
       if (/^取消$/.test(text)) {
         resetSess(uid);
-        await lineReply(replyToken, {
-          type: 'text',
-          text: MSG.canceled,
-          quickReply: { items: QR.start },
-        });
+        await lineReply(replyToken, { type: 'text', text: MSG.canceled, quickReply: { items: QR.start } });
         continue;
       }
       if (/^重新開始$/.test(text)) {
@@ -152,10 +167,9 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // 狀態機
       const s = getSess(uid);
 
-      // 首次歡迎
+      /* 第一次歡迎 */
       if (s.step === 'idle' && !s.greeted) {
         s.greeted = true;
         s.step = 'name';
@@ -222,11 +236,7 @@ export default async function handler(req, res) {
         case 'date': {
           const d = parseDateInput(text);
           if (!d) {
-            await lineReply(replyToken, {
-              type: 'text',
-              text: MSG.badInput + '\n' + MSG.date,
-              quickReply: { items: QR.date },
-            });
+            await lineReply(replyToken, { type: 'text', text: MSG.badInput + '\n' + MSG.date, quickReply: { items: QR.date } });
             break;
           }
           s.data.date = d;
@@ -238,11 +248,7 @@ export default async function handler(req, res) {
         case 'maniaB': {
           const v = toYesNo(text);
           if (v === null) {
-            await lineReply(replyToken, {
-              type: 'text',
-              text: MSG.badInput + '\n' + MSG.maniaB,
-              quickReply: { items: QR.yesno },
-            });
+            await lineReply(replyToken, { type: 'text', text: MSG.badInput + '\n' + MSG.maniaB, quickReply: { items: QR.yesno } });
             break;
           }
           s.data.maniaB = v;
@@ -254,11 +260,7 @@ export default async function handler(req, res) {
         case 'maniaE': {
           const v = toYesNo(text);
           if (v === null) {
-            await lineReply(replyToken, {
-              type: 'text',
-              text: MSG.badInput + '\n' + MSG.maniaE,
-              quickReply: { items: QR.yesno },
-            });
+            await lineReply(replyToken, { type: 'text', text: MSG.badInput + '\n' + MSG.maniaE, quickReply: { items: QR.yesno } });
             break;
           }
           s.data.maniaE = v;
@@ -284,16 +286,42 @@ export default async function handler(req, res) {
             }
           }
           s.data.wants = wants;
-          s.step = 'scores';
-          await lineReply(replyToken, { type: 'text', text: '好的，接下來請依 A~J 項目輸入 -100～100 的分數。' });
+
+          // 進入逐題輸入 A~J
+          s.data.scores = {};
+          s.scoreIdx = 0;
+          s.step = 'score';
+          await lineReply(replyToken, { type: 'text', text: scorePrompt(s.scoreIdx) });
           break;
         }
 
-        case 'scores': {
-          if (/^(分析|送出|全部)$/.test(text)) {
-            await lineReply(replyToken, { type: 'text', text: '分析處理中，請稍候…' });
+        case 'score': {
+          // 必須輸入 -100 ~ 100 的整數
+          const n = toInt(text);
+          if (!Number.isInteger(n) || n < -100 || n > 100) {
+            await lineReply(replyToken, { type: 'text', text: '請輸入 -100～100 的整數。' });
+            break;
+          }
+          const p = POINTS[s.scoreIdx];
+          s.data.scores[p.key] = n;
+
+          s.scoreIdx += 1;
+          if (s.scoreIdx < POINTS.length) {
+            await lineReply(replyToken, { type: 'text', text: scorePrompt(s.scoreIdx) });
           } else {
-            await lineReply(replyToken, { type: 'text', text: '請依提示輸入各點分數，或輸入「分析」送出。' });
+            // A~J 全部填完
+            s.step = 'afterScores';
+            await lineReply(replyToken, { type: 'text', text: MSG.afterScores });
+          }
+          break;
+        }
+
+        case 'afterScores': {
+          if (/^(分析|送出)$/.test(text)) {
+            await lineReply(replyToken, { type: 'text', text: '分析處理中，請稍候…' });
+            // 這裡接你的分析 API / 呈現結果（略）。若已有 /api/analyze，可在這裡呼叫並把結果回傳。
+          } else {
+            await lineReply(replyToken, { type: 'text', text: '若要產生結果，請輸入「分析」。' });
           }
           break;
         }
