@@ -1,5 +1,5 @@
 // api/line-webhook.js  (ESM, Node 22)
-// v8: 流程改回 B/E → A~J → 想看的內容；E 題文案調整；想看的內容支援 1~4（4=全部）
+// v9: 修正一次事件只回覆一次（移除「分析處理中」先回覆）；分析結果分塊(<=5 則)
 
 import crypto from 'node:crypto';
 
@@ -7,7 +7,8 @@ const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || '';
 const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
 
 async function lineReply(replyToken, messages) {
-  const body = { replyToken, messages: Array.isArray(messages) ? messages : [messages] };
+  const list = Array.isArray(messages) ? messages : [messages];
+  const body = { replyToken, messages: list.slice(0, 5) }; // 安全：最多 5 則
   const res = await fetch('https://api.line.me/v2/bot/message/reply', {
     method: 'POST',
     headers: {
@@ -42,9 +43,7 @@ const MSG = {
   age: '年齡（必填，需 ≥14）：\n（直接輸入數字，例如 22）',
   date: '日期：輸入「1」代表今天，或手動輸入 YYYY/MM/DD。',
   maniaB: '躁狂（B 情緒）是否偏高？\n1. 有\n2. 無',
-  // ★ 文案調整
   maniaE: '（E點）是否有躁狂？\n1. 有\n2. 無',
-  // ★ 想看的內容文案與 1~4（4=全部）
   wants:
     '想看的內容（請選 1~4；4＝全部）：\n' +
     '1. A~J 單點\n' +
@@ -85,6 +84,7 @@ const POINTS = [
   { key: 'I', name: '欣賞能力' },
   { key: 'J', name: '溝通能力' },
 ];
+
 const scorePrompt = (idx) => {
   const p = POINTS[idx];
   return `請輸入 ${p.key}（${p.name}）分數（-100～100）：`;
@@ -135,12 +135,33 @@ async function callAnalyze(payload) {
   }
   return res.json().catch(() => ({}));
 }
+
 function toLineMessagesFromAnalyzeResult(j) {
-  if (Array.isArray(j?.messages)) return j.messages;
-  if (Array.isArray(j?.texts)) return j.texts.map(t => ({ type: 'text', text: String(t) }));
-  if (Array.isArray(j?.blocks)) return j.blocks.map(t => ({ type: 'text', text: String(t) }));
-  if (typeof j?.text === 'string') return [{ type: 'text', text: j.text }];
-  return [{ type: 'text', text: typeof j === 'string' ? j : JSON.stringify(j, null, 2) }];
+  // 支援 {messages} 或 {texts/blocks} 或單一 text，最多 5 則
+  let msgs = [];
+  if (Array.isArray(j?.messages)) msgs = j.messages;
+  else if (Array.isArray(j?.texts)) msgs = j.texts.map(t => ({ type: 'text', text: String(t) }));
+  else if (Array.isArray(j?.blocks)) msgs = j.blocks.map(t => ({ type: 'text', text: String(t) }));
+  else if (typeof j?.text === 'string') msgs = [{ type: 'text', text: j.text }];
+  else msgs = [{ type: 'text', text: JSON.stringify(j, null, 2) }];
+
+  if (msgs.length <= 5) return msgs;
+
+  // 超過 5 則時，合併成最多 5 則
+  const merged = [];
+  let buf = '';
+  for (const m of msgs) {
+    const piece = (m?.text ?? '').toString();
+    if ((buf + '\n' + piece).length > 4500 && buf) {
+      merged.push({ type: 'text', text: buf.slice(0, 5000) });
+      buf = piece;
+      if (merged.length >= 4) break;
+    } else {
+      buf += (buf ? '\n' : '') + piece;
+    }
+  }
+  if (buf && merged.length < 5) merged.push({ type: 'text', text: buf.slice(0, 5000) });
+  return merged.slice(0, 5);
 }
 
 export default async function handler(req, res) {
@@ -163,6 +184,7 @@ export default async function handler(req, res) {
       const replyToken = e.replyToken;
       if (!uid) continue;
 
+      // 控制指令
       if (/^取消$/.test(text)) {
         resetSess(uid);
         await lineReply(replyToken, { type: 'text', text: MSG.canceled, quickReply: { items: QR.start } });
@@ -192,6 +214,7 @@ export default async function handler(req, res) {
 
       const s = getSess(uid);
 
+      // 首次歡迎
       if (s.step === 'idle' && !s.greeted) {
         s.greeted = true;
         s.step = 'name';
@@ -278,7 +301,7 @@ export default async function handler(req, res) {
             break;
           }
           s.data.maniaE = v;
-          // ★ 直接開始 A~J
+          // 進入 A~J
           s.data.scores = {};
           s.scoreIdx = 0;
           s.step = 'score';
@@ -299,7 +322,6 @@ export default async function handler(req, res) {
           if (s.scoreIdx < POINTS.length) {
             await lineReply(replyToken, { type: 'text', text: scorePrompt(s.scoreIdx) });
           } else {
-            // ★ A~J 結束後，改為詢問想看的內容
             s.step = 'wants';
             await lineReply(replyToken, { type: 'text', text: MSG.wants });
           }
@@ -325,9 +347,7 @@ export default async function handler(req, res) {
           }
           s.data.wants = wants;
 
-          s.step = 'analyzing';
-          await lineReply(replyToken, { type: 'text', text: '分析處理中，請稍候…' });
-
+          // ★ 修正點：先分析，再一次回覆結果（replyToken 只能用一次）
           try {
             const payload = {
               name: s.data.name,
