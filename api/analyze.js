@@ -45,12 +45,16 @@ function parseView(payload={}) {
   const v = num(payload.view ?? payload.mode ?? payload.want, 4);
   return [1,2,3,4].includes(v) ? v : 4;
 }
-function parseMania(payload={}) {
-  const m = payload.mania ?? {};
-  const b = m.B ?? payload.B_mania ?? 0;
-  const e = m.E ?? payload.E_mania ?? 0;
+
+// ✅ 更新：同時支援 maniaB/maniaE、B_mania/E_mania、mania.{B,E}
+function parseMania(payload = {}) {
+  const mObj = payload.mania || {};
+  // 可能出現的鍵
+  const rawB = mObj.B ?? payload.B_mania ?? payload.maniaB ?? payload.B ?? 0;
+  const rawE = mObj.E ?? payload.E_mania ?? payload.maniaE ?? payload.E ?? 0;
   const toBool = (x) => x === true || x === 1 || x === "1";
-  return { B: toBool(b), E: toBool(e) };
+  // 也容忍 "2" / 2 視為 false
+  return { B: toBool(rawB), E: toBool(rawE) };
 }
 
 // ---- 段落合併工具：把 lines 以「空一行」串起來，並切片避免超長 ----
@@ -93,11 +97,6 @@ function renderSingles(traits, scores) {
 }
 
 // ---- 綜合重點（教材公式/權重）----
-// oca_rules.json 的 summary 可提供：
-//   { "useWeights": true, "formula": "weighted_abs" | "weighted_signed" | "abs", "top": 3 }
-// - weighted_abs（預設）：|score| * |weight|
-// - weighted_signed：|score * weight|（與上者數學等價，但保留語意）
-// - abs：僅看 |score|（忽略權重）
 function renderSummary(summary, traits, scores) {
   const useWeights = summary?.useWeights !== false; // 預設使用權重
   const formula    = summary?.formula || (useWeights ? "weighted_abs" : "abs");
@@ -196,33 +195,33 @@ export default async function handler(req, res) {
     const baseLines = [];
     if (name)   baseLines.push(`姓名：${name}`);
     if (gender) baseLines.push(`性別：${gender}`);
-    if (age)    baseLines.push(`年齡：${age}`);
+    if (age !== "" && age !== null && age !== undefined) baseLines.push(`年齡：${age}`);
     if (date)   baseLines.push(`日期：${date}`);
     if (baseLines.length) blocks.push({ title:"基本資料", lines: [baseLines.join("｜")] });
 
     if (view === 1 || view === 4) blocks.push(renderSingles(traits, scores));
     if (view === 2 || view === 4) blocks.push(renderSummary(summary, traits, scores));
     if (view === 3 || view === 4) blocks.push(renderPersona(persona, scores));
+
+    // ✅ 更新：只要使用者有勾選躁狂（mania.B/E 為 true），不論 view 為何都顯示提醒
     const maniaBlock = renderMania(pack, scores, mania);
-    if (view === 4 && maniaBlock) blocks.push(maniaBlock);
+    if (maniaBlock && (view === 4 || mania.B || mania.E)) {
+      blocks.push(maniaBlock);
+    }
 
     if (!blocks.length) {
       blocks.push({ title: "結果", lines: ["（沒有可顯示的內容）"] });
     }
 
     // 4) 版面輸出：每段落空一行、A~J 每點之間空一行
-    //    - messages：[{type:"text", text:"..."}]（給 LINE 直接丟）
-    //    - text：把所有段落合併成一個長字串（備援）
     const messageTexts = blocks.flatMap(blockToTexts);
     const messages = messageTexts.map((t) => ({ type: "text", text: t }));
-
-    // 合併為一個長字串（保留空一行）
     const fullText = messageTexts.join("\n\n");
 
     return res.status(200).json({
       ok: true,
-      messages,   // 你的 line-webhook 可直接 push 這個
-      blocks,     // 若要做更漂亮的排版 GUI 可用這個結構
+      messages,   // LINE 直接丟
+      blocks,
       text: fullText,
       meta: { source: pack.meta || {} }
     });
