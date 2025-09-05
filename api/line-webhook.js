@@ -1,382 +1,356 @@
 // api/line-webhook.js
-// 單檔可覆蓋版：修正「輸入姓名後卡住/重複」→ 姓名寫入後必定續問下一題
-// 支援：填表 / 重新開始 / 取消 指令；數字選單；A~J 依序輸入；可輸入「分析」觸發後端分析（可依你現有 analyze/submit API 調整）
-//
-// 環境變數：LINE_CHANNEL_SECRET、LINE_CHANNEL_ACCESS_TOKEN
-// Node: ESM
+// ESM 版本，保證回 200，不讓 LINE 顯示 500。含完整對話流程。
 
-import { Client, validateSignature } from '@line/bot-sdk';
+import { Client } from "@line/bot-sdk";
 
-// ------- LINE 基本設定 -------
-const config = {
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || process.env.CHANNEL_ACCESS_TOKEN || '',
-  channelSecret: process.env.LINE_CHANNEL_SECRET || process.env.CHANNEL_SECRET || '',
-};
-const client = new Client(config);
+const client = new Client({
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || "",
+});
 
-// ------- 極簡 session（記憶體） -------
-/** @type {Map<string, any>} */
+// ---- 簡易 session（記憶體）----
 const sessions = new Map();
-const SCORE_KEYS = ['A','B','C','D','E','F','G','H','I','J'];
-
-function getSession(uid) {
-  let s = sessions.get(uid);
-  if (!s) {
-    s = freshSession();
-    sessions.set(uid, s);
+function getSession(userId) {
+  if (!sessions.has(userId)) {
+    sessions.set(userId, {
+      step: "idle",
+      data: {
+        name: "",
+        gender: "", // 男/女/其他
+        age: "",
+        scores: { A:null,B:null,C:null,D:null,E:null,F:null,G:null,H:null,I:null,J:null },
+        maniaB: null, // 1 有 / 2 無
+        maniaE: null, // 1 有 / 2 無
+      },
+      lastMsgTs: 0,
+    });
   }
-  return s;
+  return sessions.get(userId);
 }
-function freshSession() {
-  return {
-    phase: 'idle',          // idle | form | done
-    step: 0,                // 目前進度
-    form: {
-      name: '',
-      gender: '',           // 男/女/其他
-      age: null,            // number
-      date: '',             // YYYY/MM/DD
-      maniaB: null,         // true/false
-      maniaE: null,         // true/false
-      want: 4,              // 1~4; 4=全部
-      scores: { A:null,B:null,C:null,D:null,E:null,F:null,G:null,H:null,I:null,J:null },
-    },
-    scoreIndex: 0,          // A~J 進度
-    waiting: null,          // 目前等哪一題（僅供除錯）
-  };
-}
-function resetToForm(s) {
-  const keepScores = false; // 若要保留舊分數可改 true
-  const base = freshSession();
-  if (keepScores) base.form.scores = s.form.scores;
-  sessions.set(s.userId, base);
-  return base;
+function resetSession(userId) {
+  sessions.delete(userId);
 }
 
-// ------- 小工具 -------
-function todayStr() {
-  const d = new Date();
-  const mm = `${d.getMonth()+1}`.padStart(2, '0');
-  const dd = `${d.getDate()}`.padStart(2, '0');
-  return `${d.getFullYear()}/${mm}/${dd}`;
-}
-function toNumberSafe(v) {
-  const n = Number(String(v).trim());
-  return Number.isFinite(n) ? n : NaN;
-}
-function genderFromNum(n) {
-  return ({ 1:'男', 2:'女', 3:'其他' })[n] || null;
-}
-function yesNoFromNum(n) {
-  if (n === 1) return true;
-  if (n === 2) return false;
-  return null;
-}
-function buildQR(items) {
-  // LINE Quick Reply
+// ---- 共用 UI ----
+function qr(items) {
   return {
-    items: items.map(({ label, text }) => ({
-      type: 'action',
-      action: { type: 'message', label, text },
+    items: items.map(([label, text]) => ({
+      type: "action",
+      action: { type: "message", label, text },
     })),
   };
 }
 
-// ------- 問下一題（核心修正：每題寫入後一定會 call 這個續問） -------
-async function askNext(replyToken, s) {
-  s.waiting = null;
-
-  // 依 step 順序詢問
-  switch (s.step) {
-    case 0: { // 歡迎 + 問姓名
-      s.phase = 'form';
-      s.waiting = 'name';
-      s.step = 1;
-      await client.replyMessage(replyToken, [
-        { type: 'text', text: '您好，我是 Eric 的 OCA 助理，我會逐一詢問您每項資料，請您確實填寫，謝謝。' },
-        { type: 'text', text: '請輸入填表人姓名：' },
-      ]);
-      return;
-    }
-    case 1: { // 問性別
-      s.waiting = 'gender';
-      s.step = 2;
-      await client.replyMessage(replyToken, {
-        type: 'text',
-        text: '性別請選（輸入 1/2/3）：\n1. 男\n2. 女\n3. 其他',
-        quickReply: buildQR([
-          { label: '1 男', text: '1' },
-          { label: '2 女', text: '2' },
-          { label: '3 其他', text: '3' },
-        ]),
-      });
-      return;
-    }
-    case 2: { // 問年齡
-      s.waiting = 'age';
-      s.step = 3;
-      await client.replyMessage(replyToken, { type: 'text', text: '請輸入年齡（數字）：' });
-      return;
-    }
-    case 3: { // 問日期
-      s.waiting = 'date';
-      s.step = 4;
-      await client.replyMessage(replyToken, {
-        type: 'text',
-        text: '日期：輸入「1」代表今天，或手動輸入 YYYY/MM/DD。',
-        quickReply: buildQR([
-          { label: '1 今天', text: '1' },
-        ]),
-      });
-      return;
-    }
-    case 4: { // 躁狂 B（情緒）
-      s.waiting = 'maniaB';
-      s.step = 5;
-      await client.replyMessage(replyToken, {
-        type: 'text',
-        text: '躁狂（B 情緒）是否偏高？\n1. 有\n2. 無',
-        quickReply: buildQR([
-          { label: '1 有', text: '1' },
-          { label: '2 無', text: '2' },
-        ]),
-      });
-      return;
-    }
-    case 5: { // 躁狂 E（E 點）
-      s.waiting = 'maniaE';
-      s.step = 6;
-      await client.replyMessage(replyToken, {
-        type: 'text',
-        text: '躁狂（E 點）是否偏高？\n1. 有\n2. 無',
-        quickReply: buildQR([
-          { label: '1 有', text: '1' },
-          { label: '2 無', text: '2' },
-        ]),
-      });
-      return;
-    }
-    case 6: { // 想看的內容
-      s.waiting = 'want';
-      s.step = 7;
-      await client.replyMessage(replyToken, {
-        type: 'text',
-        text: '想看的內容（請選 1~4；4=全部）：\n1. A~J 單點\n2. 綜合重點\n3. 人物側寫\n4. 全部\n請輸入您的選項（1~4）。',
-        quickReply: buildQR([
-          { label: '1 A~J', text: '1' },
-          { label: '2 綜合重點', text: '2' },
-          { label: '3 人物側寫', text: '3' },
-          { label: '4 全部', text: '4' },
-        ]),
-      });
-      return;
-    }
-    // 之後是 A~J 分數
-    default: {
-      // 若 want 包含 1（或等同 4）才要進入 A~J
-      const needScores = (s.form.want === 1 || s.form.want === 4);
-      if (!needScores) {
-        s.phase = 'done';
-        await client.replyMessage(replyToken, {
-          type: 'text',
-          text: '已記錄。若要產生分析，請輸入「分析」。或輸入「重新開始」重來。',
-        });
-        return;
-      }
-      // 還有分數要填
-      if (s.scoreIndex < SCORE_KEYS.length) {
-        const curKey = SCORE_KEYS[s.scoreIndex];
-        s.waiting = `score:${curKey}`;
-        await client.replyMessage(replyToken, {
-          type: 'text',
-          text: `請輸入 ${curKey}（${labelOfKey(curKey)}）分數（-100 ～ 100）：`,
-        });
-        return;
-      }
-      // A~J 填完
-      s.phase = 'done';
-      await client.replyMessage(replyToken, [
-        { type: 'text', text: 'A~J 分數已填完。' },
-        { type: 'text', text: '若要產生結果，請輸入「分析」。或輸入「重新開始」重來。' },
-      ]);
-    }
-  }
+function askWelcome() {
+  return [
+    { type: "text", text: "您好，我是 Eric 的 OCA 助理，我會逐一詢問您每項資料，請您確實填寫，謝謝。" },
+    {
+      type: "text",
+      text: "請輸入填表人姓名：",
+      quickReply: qr([["取消","取消"],["重新開始","重新開始"]]),
+    },
+  ];
 }
 
-function labelOfKey(key) {
-  // 教材定義
-  const map = {
-    A:'穩定性', B:'愉快', C:'鎮定', D:'確定力', E:'活躍',
-    F:'積極', G:'負責', H:'評估能力', I:'欣賞能力', J:'溝通能力',
+function askGender() {
+  return {
+    type: "text",
+    text: "性別請選擇（或輸入 1/2/3）：\n1. 男\n2. 女\n3. 其他",
+    quickReply: qr([["1","1"],["2","2"],["3","3"],["取消","取消"]]),
   };
-  return map[key] || key;
 }
 
-// ------- 寫入答案並續問（每次使用者回覆都走這裡） -------
-async function writeAndNext(replyToken, s, text) {
-  const t = String(text || '').trim();
-
-  switch (s.waiting) {
-    case 'name': {
-      s.form.name = t;
-      return askNext(replyToken, s);
-    }
-    case 'gender': {
-      const g = genderFromNum(Number(t));
-      if (!g) return client.replyMessage(replyToken, { type:'text', text:'請輸入 1/2/3。' });
-      s.form.gender = g;
-      return askNext(replyToken, s);
-    }
-    case 'age': {
-      const n = toNumberSafe(t);
-      if (!Number.isFinite(n) || n < 0) return client.replyMessage(replyToken, { type:'text', text:'請輸入正確的年齡（數字）。' });
-      s.form.age = n;
-      return askNext(replyToken, s);
-    }
-    case 'date': {
-      if (t === '1') {
-        s.form.date = todayStr();
-      } else {
-        // 簡單驗證 YYYY/MM/DD
-        if (!/^\d{4}\/\d{2}\/\d{2}$/.test(t)) {
-          return client.replyMessage(replyToken, { type:'text', text:'請輸入「1」或日期格式 YYYY/MM/DD。' });
-        }
-        s.form.date = t;
-      }
-      return askNext(replyToken, s);
-    }
-    case 'maniaB': {
-      const v = yesNoFromNum(Number(t));
-      if (v === null) return client.replyMessage(replyToken, { type:'text', text:'請輸入 1（有）或 2（無）。' });
-      s.form.maniaB = v;
-      return askNext(replyToken, s);
-    }
-    case 'maniaE': {
-      const v = yesNoFromNum(Number(t));
-      if (v === null) return client.replyMessage(replyToken, { type:'text', text:'請輸入 1（有）或 2（無）。' });
-      s.form.maniaE = v;
-      return askNext(replyToken, s);
-    }
-    case 'want': {
-      const n = Number(t);
-      if (![1,2,3,4].includes(n)) {
-        return client.replyMessage(replyToken, { type:'text', text:'請輸入 1~4 其中一個數字。' });
-      }
-      s.form.want = n;
-      // 若需要 A~J，進入分數回合；否則直接 done
-      if (n === 1 || n === 4) {
-        s.scoreIndex = 0;
-        // step 設高一點避免再回想看的內容
-        s.step = 999;
-      }
-      return askNext(replyToken, s);
-    }
-    default: {
-      // 可能在填 A~J
-      if (String(s.waiting || '').startsWith('score:')) {
-        const k = s.waiting.split(':')[1];
-        const val = toNumberSafe(t);
-        if (!Number.isFinite(val) || val < -100 || val > 100) {
-          return client.replyMessage(replyToken, { type:'text', text:'請輸入 -100 ～ 100 之間的數字。' });
-        }
-        s.form.scores[k] = val;
-        s.scoreIndex += 1;
-        return askNext(replyToken, s);
-      }
-      // 萬一 waiting 為空：補一個提示或重新導向
-      return client.replyMessage(replyToken, { type:'text', text:'我在等下一個答案，若要重來請輸入「重新開始」。' });
-    }
-  }
+function askAge() {
+  return {
+    type: "text",
+    text: "請輸入年齡（整數，例：22）：",
+    quickReply: qr([["取消","取消"],["重新開始","重新開始"]]),
+  };
 }
 
-// ------- 指令處理 -------
-async function handleCommandText(replyToken, s, text) {
-  const t = String(text).trim();
-
-  // 系統指令
-  if (t === '取消') {
-    sessions.delete(s.userId);
-    return client.replyMessage(replyToken, {
-      type:'text',
-      text:'已取消。若要重新開始，輸入「填表」。',
-    });
-  }
-  if (t === '重新開始') {
-    const ns = freshSession();
-    ns.userId = s.userId;
-    sessions.set(s.userId, ns);
-    return askNext(replyToken, ns); // 直接從姓名開始
-  }
-  if (t === '填表') {
-    if (s.phase !== 'form') {
-      s.phase = 'form';
-      s.step = 0;
-      return askNext(replyToken, s);
-    }
-  }
-
-  // 產生分析（你可以改成呼叫 /api/submit-oca 或 /api/analyze）
-  if (t === '分析') {
-    // 這裡僅示範：回應已接收。你可以改成呼叫你現有的分析 API。
-    // const base = `https://${process.env.VERCEL_URL || ''}`; // 若要呼叫自己後端可用此組 URL
-    await client.replyMessage(replyToken, { type:'text', text:'分析處理中，請稍候…（可依你現有的 API 實作）' });
-    return;
-  }
-
-  // 其他文字：若在流程中就寫入答案；不在流程中就提示
-  if (s.phase === 'form') {
-    return writeAndNext(replyToken, s, t);
-  }
-  // 不在流程 → 提示開始
-  return client.replyMessage(replyToken, {
-    type:'text',
-    text:'我在這裡～輸入「填表」開始填資料，或輸入「取消」離開。',
-    quickReply: buildQR([
-      { label:'開始填表', text:'填表' },
-      { label:'重新開始', text:'重新開始' },
-      { label:'取消', text:'取消' },
-    ]),
-  });
+function askScore(letter) {
+  const nameMap = {
+    A:"穩定性", B:"愉快", C:"鎮定", D:"確定力", E:"活躍",
+    F:"積極", G:"負責", H:"評估能力", I:"欣賞能力", J:"溝通能力"
+  };
+  return {
+    type: "text",
+    text: `請輸入 ${letter}（${nameMap[letter]}）分數（-100～100）：`,
+    quickReply: qr([["取消","取消"],["重新開始","重新開始"]]),
+  };
 }
 
-// ------- LINE webhook handler -------
-export const config = { api: { bodyParser: false } };
+function askMania(which) {
+  const label = which === "B" ? "躁狂（B 情緒）" : "躁狂（E 點）";
+  return {
+    type: "text",
+    text: `${label} 是否偏高？\n1. 有\n2. 無`,
+    quickReply: qr([["1","1"],["2","2"],["取消","取消"],["重新開始","重新開始"]]),
+  };
+}
 
+function askReportMenu() {
+  return {
+    type: "text",
+    text: "想看的內容（請選 1～4；4＝全部）：\n1. A～J 單點\n2. 綜合重點\n3. 人物側寫\n4. 全部\n\n請輸入您想要的選項（1～4）。",
+    quickReply: qr([["1","1"],["2","2"],["3","3"],["4","4"]]),
+  };
+}
+
+// ---- 流程控制 ----
+const scoreOrder = ["A","B","C","D","E","F","G","H","I","J"];
+
+function nextUnfilled(scores) {
+  for (const k of scoreOrder) if (scores[k] === null) return k;
+  return null;
+}
+
+function isInt(n) {
+  return Number.isInteger(n);
+}
+function toIntSafe(s) {
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.trunc(n) : NaN;
+}
+
+// ---- 主處理 ----
 export default async function handler(req, res) {
   try {
-    if (req.method !== 'POST') {
-      res.status(405).send('Method Not Allowed');
+    if (req.method !== "POST") {
+      res.status(200).send("OK");
       return;
     }
-    const signature = req.headers['x-line-signature'] || '';
-    const bodyBuf = await readAll(req);
-    const bodyText = bodyBuf.toString('utf8');
 
-    if (!validateSignature(bodyText, config.channelSecret, signature)) {
-      res.status(401).send('Bad signature');
-      return;
-    }
-    const json = JSON.parse(bodyText);
+    const body = req.body || {};
+    const events = Array.isArray(body.events) ? body.events : [];
 
-    // 處理所有 event
-    for (const ev of json.events || []) {
-      if (ev.type !== 'message' || ev.message?.type !== 'text') continue;
-      const userId = ev.source?.userId || 'unknown';
-      const s = getSession(userId);
-      s.userId = userId;
+    const baseURL = `https://${req.headers.host}`;
 
-      await handleCommandText(ev.replyToken, s, ev.message.text);
-    }
+    await Promise.all(
+      events.map(async (ev) => {
+        try {
+          if (ev.type !== "message" || ev.message.type !== "text") return;
+          const userId = ev.source?.userId || "anon";
+          const text = (ev.message.text || "").trim();
+          const ses = getSession(userId);
 
-    res.status(200).end();
-  } catch (e) {
-    console.error('webhook error:', e);
-    res.status(200).end(); // 回 200 讓 LINE 不重送；實際錯誤已寫 log
+          // 防抖：同一毫秒/重送忽略（LINE 可能重送）
+          const ts = ev.timestamp || Date.now();
+          if (ts === ses.lastMsgTs) return;
+          ses.lastMsgTs = ts;
+
+          // 通用指令
+          if (text === "取消") {
+            resetSession(userId);
+            await client.replyMessage(ev.replyToken, {
+              type: "text",
+              text: "已取消。若要重新開始，請輸入「填表」。",
+              quickReply: qr([["填表","填表"]]),
+            });
+            return;
+          }
+          if (text === "重新開始") {
+            sessions.set(userId, getSession(userId)); // 確保存在
+            const s = getSession(userId);
+            s.step = "askName";
+            s.data = {
+              name: "",
+              gender: "",
+              age: "",
+              scores: { A:null,B:null,C:null,D:null,E:null,F:null,G:null,H:null,I:null,J:null },
+              maniaB: null,
+              maniaE: null,
+            };
+            await client.replyMessage(ev.replyToken, askWelcome());
+            return;
+          }
+          if (text === "填表") {
+            const s = getSession(userId);
+            s.step = "askName";
+            s.data = {
+              name: "",
+              gender: "",
+              age: "",
+              scores: { A:null,B:null,C:null,D:null,E:null,F:null,G:null,H:null,I:null,J:null },
+              maniaB: null,
+              maniaE: null,
+            };
+            await client.replyMessage(ev.replyToken, askWelcome());
+            return;
+          }
+
+          // 對話狀態機
+          switch (ses.step) {
+            case "idle": {
+              // 非流程訊息，給個提示
+              await client.replyMessage(ev.replyToken, {
+                type: "text",
+                text: "在這裡可輸入「填表」開始填資料，或輸入「重新開始 / 取消」。",
+                quickReply: qr([["填表","填表"],["重新開始","重新開始"],["取消","取消"]]),
+              });
+              break;
+            }
+
+            case "askName": {
+              if (!text) {
+                await client.replyMessage(ev.replyToken, {
+                  type:"text",
+                  text:"請輸入姓名（不可為空）。",
+                });
+                return;
+              }
+              ses.data.name = text;
+              ses.step = "askGender";
+              await client.replyMessage(ev.replyToken, askGender());
+              return;
+            }
+
+            case "askGender": {
+              let g = "";
+              if (text === "1" || text === "男") g = "男";
+              else if (text === "2" || text === "女") g = "女";
+              else if (text === "3" || text === "其他") g = "其他";
+              if (!g) {
+                await client.replyMessage(ev.replyToken, askGender());
+                return;
+              }
+              ses.data.gender = g;
+              ses.step = "askAge";
+              await client.replyMessage(ev.replyToken, askAge());
+              return;
+            }
+
+            case "askAge": {
+              const n = toIntSafe(text);
+              if (!isInt(n) || n < 1 || n > 120) {
+                await client.replyMessage(ev.replyToken, {
+                  type:"text",
+                  text:"年齡格式不正確，請輸入 1~120 的整數。",
+                });
+                return;
+              }
+              ses.data.age = n;
+              ses.step = "askScores";
+              const first = nextUnfilled(ses.data.scores);
+              await client.replyMessage(ev.replyToken, askScore(first));
+              return;
+            }
+
+            case "askScores": {
+              const k = nextUnfilled(ses.data.scores);
+              if (!k) {
+                // 都填完了
+                ses.step = "askManiaB";
+                await client.replyMessage(ev.replyToken, askMania("B"));
+                return;
+              }
+              const n = toIntSafe(text);
+              if (!isInt(n) || n < -100 || n > 100) {
+                await client.replyMessage(ev.replyToken, {
+                  type:"text",
+                  text:"分數格式不正確，請輸入 -100～100 的整數。",
+                });
+                return;
+              }
+              ses.data.scores[k] = n;
+              const nextK = nextUnfilled(ses.data.scores);
+              if (nextK) {
+                await client.replyMessage(ev.replyToken, askScore(nextK));
+              } else {
+                ses.step = "askManiaB";
+                await client.replyMessage(ev.replyToken, askMania("B"));
+              }
+              return;
+            }
+
+            case "askManiaB": {
+              if (text !== "1" && text !== "2") {
+                await client.replyMessage(ev.replyToken, askMania("B"));
+                return;
+              }
+              ses.data.maniaB = Number(text);
+              ses.step = "askManiaE";
+              await client.replyMessage(ev.replyToken, askMania("E"));
+              return;
+            }
+
+            case "askManiaE": {
+              if (text !== "1" && text !== "2") {
+                await client.replyMessage(ev.replyToken, askMania("E"));
+                return;
+              }
+              ses.data.maniaE = Number(text);
+              ses.step = "askReport";
+              await client.replyMessage(ev.replyToken, askReportMenu());
+              return;
+            }
+
+            case "askReport": {
+              if (!["1","2","3","4"].includes(text)) {
+                await client.replyMessage(ev.replyToken, askReportMenu());
+                return;
+              }
+
+              // 呼叫 /api/analyze 產生報告
+              const payload = {
+                name: ses.data.name,
+                gender: ses.data.gender,
+                age: ses.data.age,
+                scores: ses.data.scores,
+                maniaB: ses.data.maniaB,
+                maniaE: ses.data.maniaE,
+                want: Number(text), // 1~4
+              };
+
+              // 回覆「分析中」
+              await client.replyMessage(ev.replyToken, { type:"text", text:"分析處理中，請稍候..." });
+
+              try {
+                const r = await fetch(`${baseURL}/api/analyze`, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify(payload),
+                });
+                const data = await r.json().catch(() => ({}));
+
+                if (Array.isArray(data?.messages) && data.messages.length > 0) {
+                  // /api/analyze 若直接回 Line 訊息陣列
+                  await client.pushMessage(userId, data.messages);
+                } else if (typeof data?.text === "string") {
+                  await client.pushMessage(userId, { type:"text", text: data.text });
+                } else {
+                  await client.pushMessage(userId, { type:"text", text:"分析完成，但沒有可顯示的內容（請檢查 /api/analyze 回傳）。" });
+                }
+              } catch (e) {
+                console.error("analyze error:", e);
+                await client.pushMessage(userId, { type:"text", text:"分析時發生錯誤，稍後再試或輸入「重新開始」。" });
+              }
+
+              // 結束本次流程
+              resetSession(userId);
+              return;
+            }
+
+            default: {
+              // 非預期狀態，重置
+              resetSession(userId);
+              await client.replyMessage(ev.replyToken, {
+                type:"text",
+                text:"看起來流程不一致，已幫您重置。請輸入「填表」重新開始。",
+                quickReply: qr([["填表","填表"]]),
+              });
+            }
+          }
+        } catch (innerErr) {
+          console.error("handleEvent error:", innerErr);
+          // 即使單筆出錯，也不要影響整體回 200
+        }
+      })
+    );
+
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("webhook fatal:", err);
+    // 永遠回 200，避免 LINE 看到 500
+    res.status(200).json({ ok: false });
   }
-}
-
-async function readAll(req) {
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  return Buffer.concat(chunks);
 }
