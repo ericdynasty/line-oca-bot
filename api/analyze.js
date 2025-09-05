@@ -1,124 +1,149 @@
-// api/analyze.js (ESM) — 直接覆蓋版
-// 讀取教材規則、輸出單點/綜合/人物側寫/躁狂提示
+// api/analyze.js — 教材規則版（直接覆蓋）
+// - 讀取 /data/oca_rules.json（透過 _oca_rules.js，含 FS/HTTP、正規化、快取）
+// - 支援：A~J 單點、綜合重點（教材公式/權重）、人物側寫（when 條件）、躁狂提示（門檻從 JSON）
+// - 版面：各段落空一行；A~J 每點之間空一行
 import { loadRules, pickRange } from "./_oca_rules.js";
 
-// 固定順序與名稱（與教材一致）
-const ORDER = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
-const TRAIT_NAMES = {
-  A: "穩定性",
-  B: "愉快",
-  C: "鎮定",
-  D: "確定力",
-  E: "活躍",
-  F: "積極",
-  G: "負責",
-  H: "評估能力",
-  I: "欣賞能力",
-  J: "溝通能力",
+// 固定順序與名稱（教材）
+const ORDER = ["A","B","C","D","E","F","G","H","I","J"];
+const NAMES = {
+  A: "穩定性", B: "愉快", C: "鎮定", D: "確定力", E: "活躍",
+  F: "積極", G: "負責", H: "評估能力", I: "欣賞能力", J: "溝通能力",
 };
 
-// --- 讀取請求 body（POST/GET 都盡量相容）---
+// ---- 讀 body（支援 POST raw / 物件、GET query）----
 async function readJson(req) {
-  try {
-    const bufs = [];
-    for await (const c of req) bufs.push(c);
-    const raw = Buffer.concat(bufs).toString("utf8").trim();
-    if (!raw) return {};
-    return JSON.parse(raw);
-  } catch {
-    return {};
+  if (req.method === "POST") {
+    try {
+      if (typeof req.body === "object" && req.body) return req.body;
+      const bufs = [];
+      for await (const c of req) bufs.push(c);
+      const raw = Buffer.concat(bufs).toString("utf8");
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
   }
-}
-function num(n, d = 0) {
-  const v = Number(n);
-  return Number.isFinite(v) ? v : d;
+  try {
+    const url = new URL(req.url, "http://x");
+    const obj = {};
+    for (const [k, v] of url.searchParams.entries()) obj[k] = v;
+    return obj;
+  } catch { return {}; }
 }
 
-// 把輸入轉成固定 scores 物件（A~J 都有數值）
-function normalizeScores(payload = {}) {
+const num = (v, d=0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
+
+function normalizeScores(payload={}) {
+  const src = payload.scores ?? payload;
   const out = {};
-  const src = payload?.scores || payload; // 兼容：直接傳 A~J 或包在 scores 裡
   for (const k of ORDER) out[k] = num(src?.[k], 0);
   return out;
 }
-
-// 解析「想看的內容」：1=單點、2=綜合、3=人物、4=全部（默認 4）
-function parseView(payload = {}) {
-  const v = num(payload?.view ?? payload?.mode ?? payload?.want, 4);
-  return [1, 2, 3, 4].includes(v) ? v : 4;
+function parseView(payload={}) {
+  const v = num(payload.view ?? payload.mode ?? payload.want, 4);
+  return [1,2,3,4].includes(v) ? v : 4;
 }
-
-// 解析躁狂：允許 { mania: { B:1/true, E:0/false } } 或直接 { B_mania:1, E_mania:0 }
-function parseMania(payload = {}) {
-  const m = payload?.mania || {};
-  const b = (m.B ?? payload?.B_mania ?? 0);
-  const e = (m.E ?? payload?.E_mania ?? 0);
-  const toBool = (x) => (x === true || x === "1" || x === 1);
+function parseMania(payload={}) {
+  const m = payload.mania ?? {};
+  const b = m.B ?? payload.B_mania ?? 0;
+  const e = m.E ?? payload.E_mania ?? 0;
+  const toBool = (x) => x === true || x === 1 || x === "1";
   return { B: toBool(b), E: toBool(e) };
 }
 
-// 單點解讀（A~J）
-function renderSinglePoints(traits, scores) {
+// ---- 段落合併工具：把 lines 以「空一行」串起來，並切片避免超長 ----
+function splitText(text, max=4000) {
+  const out = [];
+  let buf = "";
+  for (const line of text.split("\n")) {
+    if ((buf + line + "\n").length > max) {
+      out.push(buf.trimEnd());
+      buf = "";
+    }
+    buf += line + "\n";
+  }
+  if (buf.trim()) out.push(buf.trimEnd());
+  return out;
+}
+function blockToTexts(block) {
+  const body = block.lines.join("\n\n"); // ★每一點/每行之間「空一行」
+  return splitText(`【${block.title}】\n\n${body}`); // ★段落標題與內容中間空一行
+}
+
+// ---- 單點 ----
+function renderSingles(traits, scores) {
   const lines = [];
   for (const k of ORDER) {
-    const name  = traits?.[k]?.name || TRAIT_NAMES[k] || k;
-    const score = num(scores[k], 0);
-    const rng   = pickRange(traits, k, score);
+    const s   = num(scores[k], 0);
+    const rng = pickRange(traits, k, s);
+    const nm  = traits?.[k]?.name || NAMES[k] || k;
+
     if (!rng) {
-      lines.push(`${k} ${name}：${score}｜（無對應區間）`);
+      lines.push(`${k} ${nm}：${s}｜（無對應區間）`);
       continue;
     }
-    const tag  = `${rng.label || ""}`.trim();
-    const ref  = rng.ref ? `（教材 ${rng.ref}）` : "";
-    const desc = rng.desc ? `｜${rng.desc}` : "";
-    lines.push(`${k} ${name}：${score}｜${tag}${desc} ${ref}`.trim());
+    const tag  = rng.label ? `${rng.label}` : "";
+    const desc = rng.desc  ? `｜${rng.desc}` : "";
+    const ref  = rng.ref   ? `（教材 ${rng.ref}）` : "";
+    lines.push(`${k} ${nm}：${s}｜${tag}${desc} ${ref}`.trim());
   }
   return { title: "A～J 單點", lines };
 }
 
-// 綜合重點（依 weights 加權，取 top N，顯示教材說明）
+// ---- 綜合重點（教材公式/權重）----
+// oca_rules.json 的 summary 可提供：
+//   { "useWeights": true, "formula": "weighted_abs" | "weighted_signed" | "abs", "top": 3 }
+// - weighted_abs（預設）：|score| * |weight|
+// - weighted_signed：|score * weight|（與上者數學等價，但保留語意）
+// - abs：僅看 |score|（忽略權重）
 function renderSummary(summary, traits, scores) {
-  const weights = summary?.weights || {};
-  const topN    = Math.max(1, num(summary?.top, 3));
+  const useWeights = summary?.useWeights !== false; // 預設使用權重
+  const formula    = summary?.formula || (useWeights ? "weighted_abs" : "abs");
+  const topN       = Math.max(1, num(summary?.top, 3));
 
   const arr = ORDER.map((k) => {
-    const w   = num(weights[k], 1);
-    const s   = num(scores[k], 0);
-    const mag = Math.abs(s) * Math.abs(w); // 以絕對值強度排序
+    const s = num(scores[k], 0);
+    const w = useWeights ? num(summary?.weights?.[k], 1) : 1;
+    let mag;
+    switch (formula) {
+      case "abs":              mag = Math.abs(s);           break;
+      case "weighted_signed":  mag = Math.abs(s * w);       break;
+      case "weighted_abs":
+      default:                 mag = Math.abs(s) * Math.abs(w);
+    }
+    const nm  = traits?.[k]?.name || NAMES[k] || k;
     const rng = pickRange(traits, k, s);
     const tag = rng?.label ? rng.label : "";
-    const ref = rng?.ref ? `（教材 ${rng.ref}）` : "";
-    const desc= rng?.desc ? `｜${rng.desc}` : "";
-    const name= traits?.[k]?.name || TRAIT_NAMES[k] || k;
-    const text= `${k} ${name}：${s}｜${tag}${desc} ${ref}`.trim();
-    return { k, w, s, mag, text };
-  }).sort((a, b) => b.mag - a.mag);
+    const desc= rng?.desc  ? `｜${rng.desc}` : "";
+    const ref = rng?.ref   ? `（教材 ${rng.ref}）` : "";
+    return {
+      k, s, w, mag,
+      text: `${k} ${nm}：${s}｜${tag}${desc} ${ref}`.trim(),
+    };
+  }).sort((a,b)=> b.mag - a.mag);
 
   const picked = arr.slice(0, topN);
   const lines  = [
-    `影響力 Top${topN}（權重與分數綜合）：`,
-    ...picked.map((x, i) => `${i + 1}. ${x.text}`),
+    `依教材：公式 ${formula}${useWeights ? "、含權重" : "、不含權重"}；Top${topN}：`,
+    ...picked.map((x,i)=> `${i+1}. ${x.text}`)
   ];
   return { title: "綜合重點", lines };
 }
 
-// 安全求值 persona.when（僅允許 A~J、數字、比較與邏輯運算）
+// ---- 人物側寫（when 條件）----
 function evalWhen(expr, scores) {
   if (typeof expr !== "string" || !expr.trim()) return false;
-  // 嚴格白名單：字母 A~J、數字、空白、()、比較與邏輯符號、加減乘除與小數點
-  const safe = /^[\sA-J0-9()<>=!&|+\-*/.]+$/u.test(expr);
-  if (!safe) return false;
+  // 嚴格白名單：A~J、數字與常見運算符
+  const ok = /^[\sA-J0-9()+\-*/.<>=!&|]+$/u.test(expr);
+  if (!ok) return false;
   try {
-    const fn = new Function(...ORDER, `return (${expr});`);
-    const args = ORDER.map((k) => num(scores[k], 0));
-    const out = fn(...args);
-    return !!out;
-  } catch {
-    return false;
-  }
+    const fn = new Function(...ORDER, `return (${expr});`); // eslint-disable-line no-new-func
+    const args = ORDER.map(k => num(scores[k], 0));
+    return !!fn(...args);
+  } catch { return false; }
 }
-
-// 人物側寫（符合條件就列出文字）
 function renderPersona(persona, scores) {
   const rules = Array.isArray(persona?.rules) ? persona.rules : [];
   const hits  = [];
@@ -130,85 +155,79 @@ function renderPersona(persona, scores) {
   return { title: "人物側寫", lines };
 }
 
-// 躁狂提示：若有被勾選或分數高於門檻（預設 >= 60），顯示教材提示
-function renderMania(rules, scores, maniaFlags) {
-  const lines = [];
-  const th = 60; // 自動門檻（可依需求調整或改成從 JSON 讀）
-
-  if (rules?.mania?.B && (maniaFlags.B || num(scores.B) >= th)) {
-    lines.push(`${rules.mania.B.label}：${rules.mania.B.hint}`);
+// ---- 躁狂提示（門檻從 JSON）----
+function renderMania(rulePack, scores, flags) {
+  const th = num(rulePack?.mania?.threshold, 60);
+  const items = [];
+  if (rulePack?.mania?.B && (flags.B || num(scores.B) >= th)) {
+    items.push(`${rulePack.mania.B.label}：${rulePack.mania.B.hint}`);
   }
-  if (rules?.mania?.E && (maniaFlags.E || num(scores.E) >= th)) {
-    lines.push(`${rules.mania.E.label}：${rules.mania.E.hint}`);
+  if (rulePack?.mania?.E && (flags.E || num(scores.E) >= th)) {
+    items.push(`${rulePack.mania.E.label}：${rulePack.mania.E.hint}`);
   }
-  if (!lines.length) return null;
-  return { title: "提醒（躁狂相關）", lines };
+  if (!items.length) return null;
+  return { title: "提醒（躁狂相關）", lines: items };
 }
 
-// 文字備援：若 caller 不處理 blocks，就用 text 顯示
-function blocksToText(blocks) {
-  return blocks
-    .map(b => [b.title, ...b.lines].join("\n"))
-    .join("\n\n");
-}
-
-// === API Handler ===
+// ---- 主處理 ----
 export default async function handler(req, res) {
   try {
-    // 1) 載入教材規則
-    const rulePack = await loadRules(req);
-    if (!rulePack?.ok) {
-      return res.status(500).json({
-        ok: false,
-        error: "RULES_LOAD_FAIL",
-        detail: rulePack?.error || "unknown"
-      });
+    // 1) 載規則
+    const pack = await loadRules(req);
+    if (!pack?.ok) {
+      return res.status(500).json({ ok:false, error:"RULES_LOAD_FAIL", detail: pack?.error });
     }
+    const { traits, summary, persona } = pack;
 
-    // 2) 讀取使用者輸入
-    const payload = req.method === "POST" ? await readJson(req) : Object.fromEntries(new URL(req.url, "http://x").searchParams);
+    // 2) 取輸入
+    const payload = await readJson(req);
     const scores  = normalizeScores(payload);
     const view    = parseView(payload);
     const mania   = parseMania(payload);
 
-    const { traits, summary, persona } = rulePack;
+    const name   = String(payload.name ?? "").trim();
+    const gender = String(payload.gender ?? "").trim();
+    const age    = payload.age ?? "";
+    const date   = payload.date ?? ""; // 有給就顯示；沒給不強制
 
-    // 3) 組裝 blocks
+    // 3) 組段落（依 view）
     const blocks = [];
-    // 單點：1 或 4
-    if (view === 1 || view === 4) {
-      blocks.push(renderSinglePoints(traits, scores));
-    }
-    // 綜合：2 或 4
-    if (view === 2 || view === 4) {
-      blocks.push(renderSummary(summary, traits, scores));
-    }
-    // 人物：3 或 4
-    if (view === 3 || view === 4) {
-      blocks.push(renderPersona(persona, scores));
-    }
-    // 躁狂提示：只有在 4（全部）時一併顯示，或你想在 1~3 也顯示可放開
-    const maniaBlock = renderMania(rulePack, scores, mania);
+    // 基本資料（若有）
+    const baseLines = [];
+    if (name)   baseLines.push(`姓名：${name}`);
+    if (gender) baseLines.push(`性別：${gender}`);
+    if (age)    baseLines.push(`年齡：${age}`);
+    if (date)   baseLines.push(`日期：${date}`);
+    if (baseLines.length) blocks.push({ title:"基本資料", lines: [baseLines.join("｜")] });
+
+    if (view === 1 || view === 4) blocks.push(renderSingles(traits, scores));
+    if (view === 2 || view === 4) blocks.push(renderSummary(summary, traits, scores));
+    if (view === 3 || view === 4) blocks.push(renderPersona(persona, scores));
+    const maniaBlock = renderMania(pack, scores, mania);
     if (view === 4 && maniaBlock) blocks.push(maniaBlock);
 
-    // 若 blocks 為空（理論上不會發生），做基本備援
     if (!blocks.length) {
       blocks.push({ title: "結果", lines: ["（沒有可顯示的內容）"] });
     }
 
-    const text = blocksToText(blocks);
+    // 4) 版面輸出：每段落空一行、A~J 每點之間空一行
+    //    - messages：[{type:"text", text:"..."}]（給 LINE 直接丟）
+    //    - text：把所有段落合併成一個長字串（備援）
+    const messageTexts = blocks.flatMap(blockToTexts);
+    const messages = messageTexts.map((t) => ({ type: "text", text: t }));
+
+    // 合併為一個長字串（保留空一行）
+    const fullText = messageTexts.join("\n\n");
 
     return res.status(200).json({
       ok: true,
-      blocks,
-      text,
-      meta: { source: rulePack?.meta || {} }
+      messages,   // 你的 line-webhook 可直接 push 這個
+      blocks,     // 若要做更漂亮的排版 GUI 可用這個結構
+      text: fullText,
+      meta: { source: pack.meta || {} }
     });
   } catch (err) {
-    return res.status(500).json({
-      ok: false,
-      error: "ANALYZE_RUNTIME_ERROR",
-      detail: err?.message || String(err)
-    });
+    console.error("analyze error:", err);
+    return res.status(500).json({ ok:false, error:"ANALYZE_RUNTIME_ERROR", detail: err?.message || String(err) });
   }
 }
