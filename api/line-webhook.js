@@ -1,12 +1,11 @@
 // api/line-webhook.js  (ESM, Node 22)
-// v7: J 填完自動分析；移除「A~J 已填完，請輸入分析」訊息；真正呼叫 /api/analyze 並顯示回傳
+// v8: 流程改回 B/E → A~J → 想看的內容；E 題文案調整；想看的內容支援 1~4（4=全部）
 
 import crypto from 'node:crypto';
 
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET || '';
 const CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
 
-/* ---------- LINE Reply ---------- */
 async function lineReply(replyToken, messages) {
   const body = { replyToken, messages: Array.isArray(messages) ? messages : [messages] };
   const res = await fetch('https://api.line.me/v2/bot/message/reply', {
@@ -22,7 +21,6 @@ async function lineReply(replyToken, messages) {
   }
 }
 
-/* ---------- In-memory session ---------- */
 const SESS = new Map(); // userId -> { step, data, greeted, scoreIdx }
 function getSess(uid) {
   if (!SESS.has(uid)) SESS.set(uid, { step: 'idle', data: {}, greeted: false });
@@ -33,7 +31,6 @@ function resetSess(uid, keepGreeted = true) {
   SESS.set(uid, { step: 'idle', data: {}, greeted });
 }
 
-/* ---------- 文案 ---------- */
 const MSG = {
   hello1: '您好，我是 Eric 的 OCA 助理，我會逐一詢問您每項資料，請您確實填寫，謝謝。',
   hello2: '請輸入填表人姓名：',
@@ -45,8 +42,16 @@ const MSG = {
   age: '年齡（必填，需 ≥14）：\n（直接輸入數字，例如 22）',
   date: '日期：輸入「1」代表今天，或手動輸入 YYYY/MM/DD。',
   maniaB: '躁狂（B 情緒）是否偏高？\n1. 有\n2. 無',
-  maniaE: '躁狂（E 點）是否偏高？\n1. 有\n2. 無',
-  wants: '想看的內容（可多選，空白代表全部）：\n1. A~J 單點\n2. 綜合重點\n3. 人物側寫\n請輸入像「1,2」或「全部」。',
+  // ★ 文案調整
+  maniaE: '（E點）是否有躁狂？\n1. 有\n2. 無',
+  // ★ 想看的內容文案與 1~4（4=全部）
+  wants:
+    '想看的內容（請選 1~4；4＝全部）：\n' +
+    '1. A~J 單點\n' +
+    '2. 綜合重點\n' +
+    '3. 人物側寫\n' +
+    '4. 全部\n' +
+    '請輸入您想要的選項（1~4）。',
   badInput: '看起來格式不對，請再試一次。',
 };
 
@@ -68,7 +73,6 @@ const QR = {
   date: [{ type: 'action', action: { type: 'message', label: '1 今天', text: '1' } }],
 };
 
-/* ---------- A~J ---------- */
 const POINTS = [
   { key: 'A', name: '穩定性' },
   { key: 'B', name: '愉快' },
@@ -86,7 +90,6 @@ const scorePrompt = (idx) => {
   return `請輸入 ${p.key}（${p.name}）分數（-100～100）：`;
 };
 
-/* ---------- 轉換 ---------- */
 const toInt = s => {
   const n = Number(String(s).trim());
   return Number.isFinite(n) ? n : NaN;
@@ -117,9 +120,7 @@ const parseDateInput = s => {
   return null;
 };
 
-/* ---------- 呼叫 /api/analyze ---------- */
 async function callAnalyze(payload) {
-  // Vercel 會提供 VERCEL_URL（不含協定）
   const host = process.env.SELF_URL || process.env.VERCEL_URL;
   if (!host) throw new Error('缺少 VERCEL_URL，無法定位分析 API');
   const url = `https://${host}/api/analyze`;
@@ -134,22 +135,17 @@ async function callAnalyze(payload) {
   }
   return res.json().catch(() => ({}));
 }
-
 function toLineMessagesFromAnalyzeResult(j) {
-  // 支援幾種常見返回格式：messages / texts / text / blocks
   if (Array.isArray(j?.messages)) return j.messages;
   if (Array.isArray(j?.texts)) return j.texts.map(t => ({ type: 'text', text: String(t) }));
   if (Array.isArray(j?.blocks)) return j.blocks.map(t => ({ type: 'text', text: String(t) }));
   if (typeof j?.text === 'string') return [{ type: 'text', text: j.text }];
-  // 不確定的 fallback
   return [{ type: 'text', text: typeof j === 'string' ? j : JSON.stringify(j, null, 2) }];
 }
 
-/* ---------- 主 Handler ---------- */
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
-  // 驗簽
   const signature = req.headers['x-line-signature'];
   if (CHANNEL_SECRET && signature) {
     const bodyStr = JSON.stringify(req.body);
@@ -167,7 +163,6 @@ export default async function handler(req, res) {
       const replyToken = e.replyToken;
       if (!uid) continue;
 
-      // 全域指令
       if (/^取消$/.test(text)) {
         resetSess(uid);
         await lineReply(replyToken, { type: 'text', text: MSG.canceled, quickReply: { items: QR.start } });
@@ -197,7 +192,6 @@ export default async function handler(req, res) {
 
       const s = getSess(uid);
 
-      // 第一次
       if (s.step === 'idle' && !s.greeted) {
         s.greeted = true;
         s.step = 'name';
@@ -284,30 +278,7 @@ export default async function handler(req, res) {
             break;
           }
           s.data.maniaE = v;
-          s.step = 'wants';
-          await lineReply(replyToken, { type: 'text', text: MSG.wants });
-          break;
-        }
-
-        case 'wants': {
-          const t = text.replace(/，/g, ',').trim();
-          let wants = { single: false, combo: false, persona: false };
-          if (!t || /^全部$/.test(t)) wants = { single: true, combo: true, persona: true };
-          else {
-            const parts = t.split(',').map(x => x.trim()).filter(Boolean);
-            for (const p of parts) {
-              if (p === '1') wants.single = true;
-              if (p === '2') wants.combo = true;
-              if (p === '3') wants.persona = true;
-            }
-            if (!wants.single && !wants.combo && !wants.persona) {
-              await lineReply(replyToken, { type: 'text', text: MSG.badInput + '\n' + MSG.wants });
-              break;
-            }
-          }
-          s.data.wants = wants;
-
-          // 進入 A~J
+          // ★ 直接開始 A~J
           s.data.scores = {};
           s.scoreIdx = 0;
           s.step = 'score';
@@ -328,45 +299,66 @@ export default async function handler(req, res) {
           if (s.scoreIdx < POINTS.length) {
             await lineReply(replyToken, { type: 'text', text: scorePrompt(s.scoreIdx) });
           } else {
-            // A~J 完成：立刻分析（不再顯示「請輸入分析」）
-            s.step = 'analyzing';
-            await lineReply(replyToken, { type: 'text', text: '分析處理中，請稍候…' });
-
-            try {
-              const payload = {
-                name: s.data.name,
-                gender: s.data.gender,
-                age: s.data.age,
-                date: s.data.date,
-                maniaB: s.data.maniaB,
-                maniaE: s.data.maniaE,
-                wants: s.data.wants,
-                scores: s.data.scores,
-              };
-              const json = await callAnalyze(payload);
-              const messages = toLineMessagesFromAnalyzeResult(json);
-              await lineReply(replyToken, messages);
-              resetSess(uid); // 收尾
-            } catch (err) {
-              console.error('analyze failed:', err);
-              await lineReply(replyToken, {
-                type: 'text',
-                text:
-                  '分析失敗了，請稍後再試一次。\n' +
-                  '若持續發生，請檢查 /api/analyze log，或回覆「重新開始」。',
-              });
-              // 保留資料，讓使用者可再輸入「重新開始」或重試
-              s.step = 'idle';
-            }
+            // ★ A~J 結束後，改為詢問想看的內容
+            s.step = 'wants';
+            await lineReply(replyToken, { type: 'text', text: MSG.wants });
           }
           break;
         }
 
-        case 'analyzing': {
-          // 使用者多輸入的內容；避免卡死，回一段提示
-          await lineReply(replyToken, { type: 'text', text: '正在分析中，請稍候…' });
+        case 'wants': {
+          const t = text.replace(/，/g, ',').trim();
+          let wants = { single: false, combo: false, persona: false };
+          if (t === '4' || /^全部$/.test(t)) {
+            wants = { single: true, combo: true, persona: true };
+          } else {
+            const parts = t.split(/[ ,，]+/).map(x => x.trim()).filter(Boolean);
+            for (const p of parts) {
+              if (p === '1') wants.single = true;
+              if (p === '2') wants.combo = true;
+              if (p === '3') wants.persona = true;
+            }
+            if (!wants.single && !wants.combo && !wants.persona) {
+              await lineReply(replyToken, { type: 'text', text: MSG.badInput + '\n' + MSG.wants });
+              break;
+            }
+          }
+          s.data.wants = wants;
+
+          s.step = 'analyzing';
+          await lineReply(replyToken, { type: 'text', text: '分析處理中，請稍候…' });
+
+          try {
+            const payload = {
+              name: s.data.name,
+              gender: s.data.gender,
+              age: s.data.age,
+              date: s.data.date,
+              maniaB: s.data.maniaB,
+              maniaE: s.data.maniaE,
+              wants: s.data.wants,
+              scores: s.data.scores,
+            };
+            const json = await callAnalyze(payload);
+            const messages = toLineMessagesFromAnalyzeResult(json);
+            await lineReply(replyToken, messages);
+            resetSess(uid);
+          } catch (err) {
+            console.error('analyze failed:', err);
+            await lineReply(replyToken, {
+              type: 'text',
+              text:
+                '分析失敗了，請稍後再試一次。\n' +
+                '若持續發生，請檢查 /api/analyze log，或回覆「重新開始」。',
+            });
+            s.step = 'idle';
+          }
           break;
         }
+
+        case 'analyzing':
+          await lineReply(replyToken, { type: 'text', text: '正在分析中，請稍候…' });
+          break;
 
         default:
           await lineReply(replyToken, { type: 'text', text: MSG.already });
